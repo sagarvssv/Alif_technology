@@ -1,0 +1,13 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "bedrock-agentcore:InvokeAgentRuntime",
+      "Resource": [
+        "arn:aws:bedrock-agentcore:eu-central-1:497675597422:runtime/AuditPlanningAgent-ZKNs0d8l0Y",
+        "arn:aws:bedrock-agentcore:eu-central-1:497675597422:runtime/AuditPlanningAgent-ZKNs0d8l0Y/runtime-endpoint/DEFAULT"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+{
+  "message": "Generate only 5 bullet points audit planning summary for this client. Keep it under 150 words.",
+  "selectedAgent": "audit_planning_agent",
+  "documentText": "Client: ABC Trading LLC. Revenue: AED 12,500,000. Profit before tax: AED 850,000. Inventory: AED 3,100,000. Receivables: AED 2,400,000."
+}

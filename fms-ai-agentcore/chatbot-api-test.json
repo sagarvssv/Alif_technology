@@ -1,0 +1,5 @@
+{
+  "message": "Generate audit planning summary for this client.",
+  "selectedAgent": "audit_planning_agent",
+  "documentText": "Client: ABC Trading LLC. Year end: 31 Dec 2025. Revenue: AED 12,500,000. Profit before tax: AED 850,000. Total assets: AED 8,200,000. Inventory: AED 3,100,000. Receivables: AED 2,400,000. Key risks: inventory valuation, revenue cutoff, receivables recoverability, related party transactions."
+}
