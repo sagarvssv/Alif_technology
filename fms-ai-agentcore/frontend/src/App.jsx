@@ -67,35 +67,72 @@ function removeSourcesFromAnswer(answer = "") {
 
 // ─── Markdown → HTML for PDF ──────────────────────────────────────────
 function markdownToHtml(markdown = "") {
-  let html = markdown;
-  html = html.replace(/^# (.+)$/gm, "<h1>$1</h1>");
-  html = html.replace(/^## (.+)$/gm, "<h2>$1</h2>");
-  html = html.replace(/^### (.+)$/gm, "<h3>$1</h3>");
-  html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-  html = html.replace(/\*(.+?)\*/g, "<em>$1</em>");
+  const lines  = markdown.split("\n");
+  const output = [];
+  let i = 0;
 
-  const tableRegex = /(\|.+\|\n)((?:\|[-: ]+\|\n))((?:\|.+\|\n?)*)/gm;
-  html = html.replace(tableRegex, (match, headerRow, separatorRow, bodyRows) => {
-    const parseRow = (row, tag) => {
-      const cells = row.split("|").map((c) => c.trim()).filter(Boolean);
-      return "<tr>" + cells.map((c) => `<${tag}>${c}</${tag}>`).join("") + "</tr>";
-    };
-    const thead = "<thead>" + parseRow(headerRow, "th") + "</thead>";
-    const rows  = bodyRows.trim().split("\n").filter(Boolean);
-    const tbody = "<tbody>" + rows.map((r) => parseRow(r, "td")).join("") + "</tbody>";
-    return `<table>${thead}${tbody}</table>`;
-  });
+  const parseTableRow = (row, tag) => {
+    const cells = row.split("|").map((c) => c.trim()).filter(Boolean);
+    return "<tr>" + cells.map((c) => `<${tag}>${c}</${tag}>`).join("") + "</tr>";
+  };
 
-  html = html.replace(/^- (.+)$/gm, "<li>$1</li>");
-  html = html.replace(/(<li>.*<\/li>\n?)+/g, (match) => `<ul>${match}</ul>`);
-  html = html.replace(/^---$/gm, "<hr/>");
-  html = html.replace(/^(?!<[hultHULT]).+$/gm, (line) => {
-    const trimmed = line.trim();
-    if (!trimmed) return "";
-    return `<p>${trimmed}</p>`;
-  });
-  html = html.replace(/\n{2,}/g, "\n");
-  return html;
+  const isSeparator = (line) => /^\|[\s\-:|]+\|/.test(line.trim());
+  const isTableRow  = (line) => line.trim().startsWith("|") && line.trim().endsWith("|");
+
+  while (i < lines.length) {
+    const line = lines[i].trim();
+
+    // Table detection
+    if (isTableRow(lines[i]) && i + 1 < lines.length && isSeparator(lines[i + 1])) {
+      const headerRow = lines[i];
+      i += 2; // skip header + separator
+
+      const bodyRows = [];
+      while (i < lines.length && isTableRow(lines[i])) {
+        bodyRows.push(lines[i]);
+        i++;
+      }
+
+      let table = '<table>';
+      table += '<thead>' + parseTableRow(headerRow, "th") + '</thead>';
+      table += '<tbody>' + bodyRows.map((r) => parseTableRow(r, "td")).join("") + '</tbody>';
+      table += '</table>';
+      output.push(table);
+      continue;
+    }
+
+    // Headings
+    if (line.startsWith("### ")) {
+      output.push(`<h3>${line.slice(4)}</h3>`);
+    } else if (line.startsWith("## ")) {
+      output.push(`<h2>${line.slice(3)}</h2>`);
+    } else if (line.startsWith("# ")) {
+      output.push(`<h1>${line.slice(2)}</h1>`);
+    } else if (line === "---") {
+      output.push("<hr/>");
+    } else if (line.startsWith("- ")) {
+      // Collect consecutive list items
+      const items = [];
+      while (i < lines.length && lines[i].trim().startsWith("- ")) {
+        items.push(`<li>${lines[i].trim().slice(2)}</li>`);
+        i++;
+      }
+      output.push(`<ul>${items.join("")}</ul>`);
+      continue;
+    } else if (line === "") {
+      output.push("");
+    } else {
+      // Apply inline formatting
+      let text = line
+        .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+        .replace(/\*(.+?)\*/g, "<em>$1</em>");
+      output.push(`<p>${text}</p>`);
+    }
+
+    i++;
+  }
+
+  return output.join("\n");
 }
 
 function buildPdfHtml(content, reportName) {
@@ -401,7 +438,6 @@ function App() {
     setView(VIEW_MANAGER_CHAT);
   }
 
-  // ── Download as PDF ───────────────────────────────────────────────────
   async function handleDownloadAuditPlan() {
     if (!auditPlanContent) {
       alert("Please wait for the audit plan to generate first.");
@@ -435,7 +471,6 @@ function App() {
 
   useEffect(() => { return () => stopPolling(); }, []);
 
-  // ── PORTAL SELECTION ─────────────────────────────────────────────────
   if (view === VIEW_PORTAL) {
     return (
       <div className="portal-screen">
@@ -473,7 +508,6 @@ function App() {
     );
   }
 
-  // ── MAIN APP ──────────────────────────────────────────────────────────
   return (
     <div className={`app-shell ${sidebarOpen ? "sidebar-open" : "sidebar-closed"}`}>
 
@@ -573,7 +607,6 @@ function App() {
 
         {processing && <ProcessingProgress progress={processingProgress} />}
 
-        {/* USER HOME */}
         {view === VIEW_HOME && (
           <div className="home-view">
             <div className="home-hero">
@@ -614,7 +647,6 @@ function App() {
           </div>
         )}
 
-        {/* MANAGER HOME */}
         {view === VIEW_MANAGER_HOME && (
           <div className="manager-home-view">
             <div className="manager-home-hero">
@@ -654,7 +686,6 @@ function App() {
           </div>
         )}
 
-        {/* MANAGER CHAT */}
         {view === VIEW_MANAGER_CHAT && (
           <div className="chatbot-view">
             <div className="chatbot-nav-bar">
@@ -667,7 +698,6 @@ function App() {
           </div>
         )}
 
-        {/* REPORT ANALYSIS */}
         {view === VIEW_UPLOAD && (
           <div className="agent-view">
             <button className="back-nav-btn"
@@ -675,7 +705,6 @@ function App() {
               onClick={() => setView(VIEW_HOME)}>
               ← Back
             </button>
-
             <div className="master-agent-card">
               <div className="master-badge">MASTER AGENT</div>
               <FinancialIcon />
@@ -724,7 +753,6 @@ function App() {
           </div>
         )}
 
-        {/* AUDIT AGENT */}
         {view === VIEW_AGENT && (
           <div className="chatbot-view">
             <div className="chatbot-nav-bar">
@@ -742,7 +770,6 @@ function App() {
           </div>
         )}
 
-        {/* GENERAL Q&A */}
         {view === VIEW_GENERAL && (
           <div className="chatbot-view">
             <div className="chatbot-nav-bar">
