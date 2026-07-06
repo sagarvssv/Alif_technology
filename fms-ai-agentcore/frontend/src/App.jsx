@@ -6,9 +6,9 @@ const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL ||
   "https://c0feinpvm5.execute-api.eu-central-1.amazonaws.com/prod";
 
-const DOCUMENTS_API  = `${API_BASE_URL}/documents`;
-const UPLOAD_URL_API = `${API_BASE_URL}/upload-url`;
-const CHAT_API       = `${API_BASE_URL}/chat`;
+const DOCUMENTS_API   = `${API_BASE_URL}/documents`;
+const UPLOAD_URL_API  = `${API_BASE_URL}/upload-url`;
+const CHAT_API        = `${API_BASE_URL}/chat`;
 const CHAT_STATUS_API = (jobId) => `${API_BASE_URL}/chat/status/${jobId}`;
 
 const VIEW_PORTAL       = "portal";
@@ -65,6 +65,199 @@ function removeSourcesFromAnswer(answer = "") {
     .trim();
 }
 
+// ─── Markdown → HTML for PDF ──────────────────────────────────────────
+function markdownToHtml(markdown = "") {
+  let html = markdown;
+
+  // H1
+  html = html.replace(/^# (.+)$/gm, "<h1>$1</h1>");
+  // H2
+  html = html.replace(/^## (.+)$/gm, "<h2>$1</h2>");
+  // H3
+  html = html.replace(/^### (.+)$/gm, "<h3>$1</h3>");
+
+  // Bold
+  html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  // Italic
+  html = html.replace(/\*(.+?)\*/g, "<em>$1</em>");
+
+  // Tables
+  const tableRegex = /(\|.+\|\n)((?:\|[-: ]+\|\n))((?:\|.+\|\n?)*)/gm;
+  html = html.replace(tableRegex, (match, headerRow, separatorRow, bodyRows) => {
+    const parseRow = (row, tag) => {
+      const cells = row.split("|").map((c) => c.trim()).filter(Boolean);
+      return "<tr>" + cells.map((c) => `<${tag}>${c}</${tag}>`).join("") + "</tr>";
+    };
+    const thead = "<thead>" + parseRow(headerRow, "th") + "</thead>";
+    const rows  = bodyRows.trim().split("\n").filter(Boolean);
+    const tbody = "<tbody>" + rows.map((r) => parseRow(r, "td")).join("") + "</tbody>";
+    return `<table>${thead}${tbody}</table>`;
+  });
+
+  // Bullet points
+  html = html.replace(/^- (.+)$/gm, "<li>$1</li>");
+  html = html.replace(/(<li>.*<\/li>\n?)+/g, (match) => `<ul>${match}</ul>`);
+
+  // Horizontal rule
+  html = html.replace(/^---$/gm, "<hr/>");
+
+  // Paragraphs — wrap remaining lines
+  html = html.replace(/^(?!<[hultHULT]).+$/gm, (line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return "";
+    return `<p>${trimmed}</p>`;
+  });
+
+  // Clean up blank lines
+  html = html.replace(/\n{2,}/g, "\n");
+
+  return html;
+}
+
+function buildPdfHtml(content, reportName) {
+  const bodyHtml = markdownToHtml(content);
+  return `
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: Arial, sans-serif;
+    font-size: 11px;
+    color: #111827;
+    padding: 32px 40px;
+    line-height: 1.6;
+  }
+
+  /* Cover header */
+  .pdf-header {
+    background: #0f1b2d;
+    color: #fff;
+    padding: 24px 28px;
+    border-radius: 8px;
+    margin-bottom: 28px;
+  }
+  .pdf-header h1 {
+    font-size: 20px;
+    font-weight: 900;
+    color: #fff;
+    border: none;
+    margin: 0 0 4px;
+    padding: 0;
+    background: none;
+  }
+  .pdf-header p {
+    font-size: 12px;
+    color: rgba(255,255,255,0.7);
+    margin: 0;
+  }
+
+  h1 {
+    font-size: 16px;
+    font-weight: 900;
+    color: #0f1b2d;
+    border-left: 5px solid #1a56db;
+    padding: 8px 12px;
+    background: #eff6ff;
+    margin: 20px 0 12px;
+    border-radius: 4px;
+  }
+  h2 {
+    font-size: 14px;
+    font-weight: 800;
+    color: #1e40af;
+    border-left: 4px solid #2563eb;
+    padding: 6px 10px;
+    background: #f0f9ff;
+    margin: 16px 0 10px;
+    border-radius: 4px;
+  }
+  h3 {
+    font-size: 12px;
+    font-weight: 700;
+    color: #374151;
+    margin: 12px 0 6px;
+  }
+
+  p {
+    margin: 4px 0 8px;
+    font-size: 11px;
+  }
+
+  ul {
+    margin: 6px 0 10px 20px;
+  }
+  li {
+    margin-bottom: 4px;
+    font-size: 11px;
+  }
+
+  hr {
+    border: none;
+    border-top: 1px solid #e5e7eb;
+    margin: 16px 0;
+  }
+
+  /* Tables */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 10px 0 16px;
+    font-size: 10.5px;
+  }
+  th {
+    background: #1a56db;
+    color: #fff;
+    font-weight: 700;
+    padding: 7px 10px;
+    text-align: left;
+    border: 1px solid #1e40af;
+  }
+  td {
+    padding: 6px 10px;
+    border: 1px solid #d1d5db;
+    vertical-align: top;
+  }
+  tr:nth-child(even) td {
+    background: #f8fafc;
+  }
+  tr:nth-child(odd) td {
+    background: #ffffff;
+  }
+
+  strong { font-weight: 700; }
+
+  .pdf-footer {
+    margin-top: 32px;
+    padding-top: 12px;
+    border-top: 1px solid #e5e7eb;
+    font-size: 9px;
+    color: #9ca3af;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+
+<div class="pdf-header">
+  <h1>FMS AI AgentCore — Audit Planning Report</h1>
+  <p>Document: ${reportName} &nbsp;|&nbsp; Generated: ${new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" })}</p>
+  <p>Prepared by Alif Technology — Enterprise Audit Intelligence Platform</p>
+</div>
+
+${bodyHtml}
+
+<div class="pdf-footer">
+  This report was generated automatically by FMS AI AgentCore. It is intended for audit planning purposes only.
+  Alif Technology © ${new Date().getFullYear()}
+</div>
+
+</body>
+</html>`;
+}
+
 // ─── Progress Bar ─────────────────────────────────────────────────────
 function ProcessingProgress({ progress }) {
   return (
@@ -91,22 +284,20 @@ function ProcessingProgress({ progress }) {
 function FinancialIcon() {
   return (
     <svg width="64" height="64" viewBox="0 0 64 64" fill="none"
-      xmlns="http://www.w3.org/2000/svg" style={{ margin: "0 auto 12px", display: "block" }}>
+      xmlns="http://www.w3.org/2000/svg"
+      style={{ margin: "0 auto 12px", display: "block" }}>
       <rect width="64" height="64" rx="16" fill="rgba(255,255,255,0.08)" />
-      {/* Bar chart bars */}
       <rect x="10" y="36" width="9" height="16" rx="2" fill="#06b6d4" opacity="0.9"/>
       <rect x="23" y="26" width="9" height="26" rx="2" fill="#1a56db" opacity="0.9"/>
       <rect x="36" y="18" width="9" height="34" rx="2" fill="#06b6d4" opacity="0.9"/>
       <rect x="49" y="10" width="9" height="42" rx="2" fill="#1a56db" opacity="0.9"/>
-      {/* Trend line */}
       <polyline points="14,34 27,24 40,16 53,8"
-        stroke="#f59e0b" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
-      {/* Dots on trend line */}
+        stroke="#f59e0b" strokeWidth="2.5"
+        strokeLinecap="round" strokeLinejoin="round" fill="none"/>
       <circle cx="14" cy="34" r="3" fill="#f59e0b"/>
       <circle cx="27" cy="24" r="3" fill="#f59e0b"/>
       <circle cx="40" cy="16" r="3" fill="#f59e0b"/>
       <circle cx="53" cy="8"  r="3" fill="#f59e0b"/>
-      {/* AED currency symbol */}
       <text x="8" y="62" fontSize="9" fill="rgba(255,255,255,0.5)"
         fontFamily="sans-serif" fontWeight="bold">AED</text>
     </svg>
@@ -129,6 +320,7 @@ function App() {
   const [processingProgress, setProcessingProgress] = useState(0);
   const [preGeneratedReport, setPreGeneratedReport] = useState(null);
   const [preGenerating,      setPreGenerating]      = useState(false);
+  const [downloading,        setDownloading]        = useState(false);
 
   const [loadingReports, setLoadingReports] = useState(false);
   const [uploading,      setUploading]      = useState(false);
@@ -151,7 +343,6 @@ function App() {
     }, 4000);
   }
 
-  // ── Background audit plan generation ────────────────────────────────
   async function generateAuditPlanInBackground(reportId) {
     setPreGenerating(true);
     setPreGeneratedReport(null);
@@ -178,10 +369,7 @@ function App() {
           try {
             const statusRes  = await fetch(CHAT_STATUS_API(data.jobId));
             const statusData = await statusRes.json();
-            if (statusData.status === "complete") {
-              setPreGeneratedReport(statusData);
-              return;
-            }
+            if (statusData.status === "complete") { setPreGeneratedReport(statusData); return; }
             if (statusData.status === "failed") throw new Error(statusData.error);
           } catch {}
         }
@@ -331,18 +519,45 @@ function App() {
     setView(VIEW_MANAGER_CHAT);
   }
 
-  function handleDownloadAuditPlan() {
+  // ── Download as PDF ───────────────────────────────────────────────────
+  async function handleDownloadAuditPlan() {
     if (!auditPlanContent) {
       alert("Please wait for the audit plan to generate first.");
       return;
     }
-    const filename = `Audit_Plan_${getReportName(selectedReport)}_${new Date().toISOString().slice(0,10)}.txt`;
-    const blob = new Blob([auditPlanContent], { type: "text/plain;charset=utf-8" });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement("a");
-    a.href = url; a.download = filename;
-    document.body.appendChild(a); a.click(); a.remove();
-    URL.revokeObjectURL(url);
+    setDownloading(true);
+    try {
+      const html2pdf = (await import("html2pdf.js")).default;
+      const reportName = getReportName(selectedReport);
+      const htmlContent = buildPdfHtml(auditPlanContent, reportName);
+
+      const container = document.createElement("div");
+      container.innerHTML = htmlContent;
+      container.style.position = "absolute";
+      container.style.left = "-9999px";
+      document.body.appendChild(container);
+
+      const filename = `Audit_Plan_${reportName}_${new Date().toISOString().slice(0,10)}.pdf`;
+
+      await html2pdf()
+        .set({
+          margin:       [10, 10, 10, 10],
+          filename,
+          image:        { type: "jpeg", quality: 0.98 },
+          html2canvas:  { scale: 2, useCORS: true, logging: false },
+          jsPDF:        { unit: "mm", format: "a4", orientation: "portrait" },
+          pagebreak:    { mode: ["avoid-all", "css", "legacy"] },
+        })
+        .from(container)
+        .save();
+
+      document.body.removeChild(container);
+    } catch (err) {
+      console.error("PDF generation failed:", err);
+      alert("PDF generation failed. Please try again.");
+    } finally {
+      setDownloading(false);
+    }
   }
 
   useEffect(() => { return () => stopPolling(); }, []);
@@ -470,7 +685,10 @@ function App() {
             <div className="topbar-report-pill">
               <span className="pill-icon">📑</span>
               <span className="pill-name">{getReportName(selectedReport)}</span>
-              <button className="pill-btn" onClick={handleDownloadAuditPlan}>⬇ Download Audit Plan</button>
+              <button className="pill-btn" onClick={handleDownloadAuditPlan}
+                disabled={downloading}>
+                {downloading ? "⏳ Generating PDF…" : "⬇ Download PDF"}
+              </button>
             </div>
           )}
         </header>
@@ -577,7 +795,7 @@ function App() {
           </div>
         )}
 
-        {/* REPORT ANALYSIS — agent picker */}
+        {/* REPORT ANALYSIS */}
         {view === VIEW_UPLOAD && (
           <div className="agent-view">
             <button className="back-nav-btn"
@@ -586,13 +804,9 @@ function App() {
               ← Back
             </button>
 
-            {/* Master agent card with financial icon */}
             <div className="master-agent-card">
               <div className="master-badge">MASTER AGENT</div>
-
-              {/* Financial chart icon instead of robot */}
               <FinancialIcon />
-
               <div className="master-title">FMS AI AgentCore</div>
               <div className="master-desc">
                 Your document has been processed. Select an agent below to view
@@ -618,9 +832,9 @@ function App() {
                   </div>
                   {agent.available ? (
                     <div className="sub-agent-status-pill">
-                      {preGenerating   && <span className="status-pill generating">⏳ Preparing…</span>}
-                      {!preGenerating  && preGeneratedReport  && <span className="status-pill ready">✅ Ready</span>}
-                      {!preGenerating  && !preGeneratedReport && <span className="status-pill pending">→</span>}
+                      {preGenerating  && <span className="status-pill generating">⏳ Preparing…</span>}
+                      {!preGenerating && preGeneratedReport  && <span className="status-pill ready">✅ Ready</span>}
+                      {!preGenerating && !preGeneratedReport && <span className="status-pill pending">→</span>}
                     </div>
                   ) : (
                     <div className="sub-agent-soon">Coming Soon</div>
@@ -642,8 +856,7 @@ function App() {
         {view === VIEW_AGENT && (
           <div className="chatbot-view">
             <div className="chatbot-nav-bar">
-              <button className="back-nav-btn"
-                onClick={() => setView(VIEW_UPLOAD)}>
+              <button className="back-nav-btn" onClick={() => setView(VIEW_UPLOAD)}>
                 ← Back to Report Analysis
               </button>
             </div>

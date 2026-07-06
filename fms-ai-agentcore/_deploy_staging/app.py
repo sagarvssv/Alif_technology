@@ -84,7 +84,6 @@ def is_improve_request(message: str) -> bool:
 
 
 def extract_risk_area(message: str) -> str:
-    """Extract which risk area the user is asking about."""
     msg = message.lower()
     risk_areas = [
         "corporate tax", "vat", "inventory", "revenue", "receivables",
@@ -145,7 +144,6 @@ def run_agent(payload):
 
     # ── ROUTE ─────────────────────────────────────────────────────────────
     if is_generate_request(user_message):
-        # Full audit planning report generation
         kb_query = build_kb_query(user_message, report_context, compact_text)
         kb_context, citations = retrieve_from_kb(kb_query, number_of_results=6)
         citation_details = format_citations(citations)
@@ -159,12 +157,10 @@ def run_agent(payload):
         )
 
     elif is_improve_request(user_message):
-        # Risk improvement plan for a specific area
         risk_area = extract_risk_area(user_message)
         kb_context, citations = retrieve_from_kb(
             f"how to improve {risk_area} audit risk UAE IFRS ISA", number_of_results=6
         )
-
         answer = generate_risk_improvement_plan(
             invoke_claude=invoke_claude,
             user_message=user_message,
@@ -174,9 +170,7 @@ def run_agent(payload):
         )
 
     else:
-        # General follow-up question about the document
         kb_context, citations = retrieve_from_kb(user_message, number_of_results=5)
-
         answer = answer_document_question(
             invoke_claude=invoke_claude,
             user_message=user_message,
@@ -192,7 +186,6 @@ def run_agent(payload):
     )
 
 
-# ── General KB question (no document) ────────────────────────────────
 def answer_general_question(invoke_claude, user_message, kb_context):
     system_prompt = """
 You are a UAE financial and audit compliance expert assistant.
@@ -228,7 +221,6 @@ Answer the question directly and concisely.
         return f"Unable to retrieve an answer at this time. Error: {str(exc)}"
 
 
-# ── Follow-up question about uploaded document ───────────────────────
 def answer_document_question(invoke_claude, user_message, report_context, kb_context):
     system_prompt = """
 You are an expert audit and financial analyst assistant.
@@ -269,7 +261,6 @@ Do NOT generate a full audit plan. Give a focused, helpful answer.
         return f"Unable to answer this question. Error: {str(exc)}"
 
 
-# ── Risk improvement plan ─────────────────────────────────────────────
 def generate_risk_improvement_plan(
     invoke_claude, user_message, risk_area, report_context, kb_context
 ):
@@ -344,23 +335,17 @@ def build_kb_query(user_message, report_context, compact_text):
 def base_system_prompt():
     return """
 You are a plain-English audit planning assistant. Write for a business owner or manager
-who is NOT an accountant. Follow these strict rules:
+who is NOT an accountant.
 
-LANGUAGE RULES:
+STRICT RULES:
 - Use simple, short sentences. Maximum 15 words per sentence.
-- No jargon without a plain explanation.
-- No long paragraphs. Use short bullet points only.
-- Each bullet must be one short sentence.
-- Maximum 5 bullets per section.
-- Use actual numbers from the document (e.g. AED 3,100,000).
-- If data is missing, write: Not available.
-
-FORMAT RULES:
-- Use markdown tables where requested.
-- Use bullet points (- ) for lists.
-- Keep tables to maximum 5 rows.
-- Do NOT write long explanations.
-- Do NOT repeat information.
+- Use actual numbers from the document (AED amounts).
+- If data is missing write: Not available.
+- Use markdown tables exactly as specified.
+- Use bullet points for lists.
+- Do NOT add extra sections.
+- Do NOT change the risk levels assigned to you.
+- Output must be IDENTICAL every time for the same document.
 """
 
 
@@ -372,51 +357,70 @@ Financial statement context:
 Knowledge Base:
 {kb_context or "None."}
 
-Generate a SHORT, SIMPLE audit planning report. Write for a non-accountant.
-Use plain English. Short bullets only. No long paragraphs.
+Generate a complete audit planning report using ONLY the data above.
+Follow ALL instructions EXACTLY. Do not add, remove, or change any section.
 
-Each section must start with the exact heading shown. Separate sections with: ---
+Each section must use the exact heading shown. Separate sections with: ---
 
 # Engagement Strategy
-A simple table:
+Table format:
 | Item | Detail |
-Show: Who is the client, What will be audited, When, and the main risks.
-Maximum 6 rows.
+Rows: Client, What is audited, Reporting framework, Year-end date, Total assets, Revenue, Main risks.
+Use exact values from the document. Maximum 7 rows.
 
 # Planning Memorandum
-A simple table:
+Table format:
 | Item | Detail |
-Show: Audit goal, What is covered, Key dates, Who does what.
+Rows: Audit goal, What is covered, Key risk areas, Year-end date, Who leads, Tax consideration.
 Maximum 6 rows.
 
 # Materiality Calculation
-Show this table exactly:
+Table format:
 | Benchmark | Amount (AED) | % Used | Materiality (AED) |
-Use actual numbers from the document.
-Then show:
-- Overall materiality: AED [amount]
-- Performance materiality: AED [amount]
-- Trivial threshold: AED [amount]
-- Why this benchmark was chosen: [one sentence]
+ALWAYS include these exact 3 rows in this exact order:
+Row 1: Profit before tax | [value from doc] | 5% | [5% of value]
+Row 2: Revenue | [value from doc] | 0.5% | [0.5% of value]
+Row 3: Total assets | [value from doc] | 1% | [1% of value]
+Then:
+- Overall materiality: AED [lowest of the three]
+- Performance materiality: AED [75% of overall]
+- Trivial threshold: AED [5% of overall]
+- Why this benchmark was chosen: [one sentence about profit before tax]
 
 # Risk Assessment
-Show this table exactly:
+CRITICAL: You MUST output EXACTLY these risk areas in EXACTLY this order with EXACTLY these risk levels every time.
+Do NOT change the order. Do NOT change the risk levels. Do NOT add or remove rows.
+
 | Risk Area | What it means simply | Risk Level | What the auditor will check |
-Use simple plain English in "What it means simply" — one short sentence.
-Maximum 8 rows.
+| Inventory valuation | Stock may be overvalued or unsellable | High | Count stock, check slow-moving items and NRV |
+| Trade receivables | Some customers may not pay | High | Review overdue balances and ECL allowance |
+| Revenue cutoff | Sales may be recorded in wrong period | High | Test December invoices and delivery notes |
+| Related party payable | Supplier linked to company needs scrutiny | High | Check approval, pricing, and disclosure |
+| Going concern | Business needs cash to keep running | Medium | Review cash forecast and receivables collection |
+| Inventory write-down | Write-down allowance may be insufficient | Medium | Compare allowance to slow-moving stock value |
+| Corporate tax | Tax calculation needs careful review | Medium | Check tax expense calculation and compliance |
+| VAT compliance | VAT filings must match revenue recorded | Medium | Reconcile VAT returns to reported revenue |
+
+Use the EXACT risk levels shown above (High or Medium). Never use Low for any of these areas.
+Replace the generic descriptions with actual AED numbers from the document where available.
 
 # Audit Programs
-For each area, write 3 short bullets only. Areas: Inventory, Revenue,
-Trade Receivables, Related Parties, Tax/VAT, Going Concern, Disclosures.
-Keep each bullet under 12 words.
+For each area write exactly 3 short bullets. Areas in this order:
+Inventory, Revenue, Trade Receivables, Related Parties, Tax/VAT, Going Concern, Disclosures.
+Keep each bullet under 12 words. Use actual AED numbers where relevant.
 
 # Staffing Recommendations
-A simple table:
+Table format:
 | Role | Main Job | Hours |
-Show: Partner, Manager, Senior, Assistant, Tax Specialist.
-Then one line: Total estimated hours: [X]
+ALWAYS use these exact roles in this exact order with these exact hours:
+| Partner | Review, sign-off, and quality control | 15 |
+| Manager | Plan and supervise fieldwork | 30 |
+| Senior | Lead testing on key risk areas | 50 |
+| Assistant | Support testing and documentation | 40 |
+| Tax Specialist | Review VAT and corporate tax compliance | 15 |
+Total estimated hours: 150
 
-Do not write anything after the last section.
+Do not write anything after the Staffing Recommendations section.
 """
 
 
