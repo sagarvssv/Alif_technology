@@ -74,7 +74,7 @@ function markdownToHtml(markdown = "") {
 
   const parseTableRow = (row, tag) => {
     const cells = row.split("|").map((c) => c.trim()).filter(Boolean);
-    return "<tr>" + cells.map((c) => `<${tag}>${c}</${tag}>`).join("") + "</tr>";
+    return "<tr>" + cells.map((c) => `<${tag} style="padding:7px 10px;border:1px solid ${tag === "th" ? "#1e40af" : "#d1d5db"};background:${tag === "th" ? "#1a56db" : "transparent"};color:${tag === "th" ? "#fff" : "#111827"};font-weight:${tag === "th" ? "700" : "400"};text-align:left;vertical-align:top;">${c}</${tag}>`).join("") + "</tr>";
   };
 
   const isSeparator = (line) => /^\|[\s\-:|]+\|/.test(line.trim());
@@ -91,29 +91,38 @@ function markdownToHtml(markdown = "") {
         bodyRows.push(lines[i]);
         i++;
       }
-      let table = "<table>";
-      table += "<thead>" + parseTableRow(headerRow, "th") + "</thead>";
-      table += "<tbody>" + bodyRows.map((r) => parseTableRow(r, "td")).join("") + "</tbody>";
-      table += "</table>";
+
+      const evenStyle = "background:#f8fafc;";
+      const oddStyle  = "background:#ffffff;";
+
+      let table = `<table style="width:100%;border-collapse:collapse;margin:10px 0 16px;font-size:10.5px;">`;
+      table += `<thead>${parseTableRow(headerRow, "th")}</thead>`;
+      table += `<tbody>`;
+      bodyRows.forEach((r, idx) => {
+        const bgStyle = idx % 2 === 0 ? evenStyle : oddStyle;
+        const cells = r.split("|").map((c) => c.trim()).filter(Boolean);
+        table += `<tr style="${bgStyle}">` + cells.map((c) => `<td style="padding:6px 10px;border:1px solid #d1d5db;vertical-align:top;">${c}</td>`).join("") + "</tr>";
+      });
+      table += `</tbody></table>`;
       output.push(table);
       continue;
     }
 
     if (line.startsWith("### ")) {
-      output.push(`<h3>${line.slice(4)}</h3>`);
+      output.push(`<h3 style="font-size:12px;font-weight:700;color:#374151;margin:12px 0 6px;">${line.slice(4)}</h3>`);
     } else if (line.startsWith("## ")) {
-      output.push(`<h2>${line.slice(3)}</h2>`);
+      output.push(`<h2 style="font-size:14px;font-weight:800;color:#1e40af;border-left:4px solid #2563eb;padding:6px 10px;background:#f0f9ff;margin:16px 0 10px;border-radius:4px;">${line.slice(3)}</h2>`);
     } else if (line.startsWith("# ")) {
-      output.push(`<h1>${line.slice(2)}</h1>`);
+      output.push(`<h1 style="font-size:16px;font-weight:900;color:#0f1b2d;border-left:5px solid #1a56db;padding:8px 12px;background:#eff6ff;margin:20px 0 12px;border-radius:4px;">${line.slice(2)}</h1>`);
     } else if (line === "---") {
-      output.push("<hr/>");
+      output.push(`<hr style="border:none;border-top:1px solid #e5e7eb;margin:16px 0;"/>`);
     } else if (line.startsWith("- ")) {
       const items = [];
       while (i < lines.length && lines[i].trim().startsWith("- ")) {
-        items.push(`<li>${lines[i].trim().slice(2)}</li>`);
+        items.push(`<li style="margin-bottom:4px;font-size:11px;">${lines[i].trim().slice(2)}</li>`);
         i++;
       }
-      output.push(`<ul>${items.join("")}</ul>`);
+      output.push(`<ul style="margin:6px 0 10px 20px;">${items.join("")}</ul>`);
       continue;
     } else if (line === "") {
       output.push("");
@@ -121,7 +130,7 @@ function markdownToHtml(markdown = "") {
       let text = line
         .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
         .replace(/\*(.+?)\*/g, "<em>$1</em>");
-      output.push(`<p>${text}</p>`);
+      output.push(`<p style="margin:4px 0 8px;font-size:11px;">${text}</p>`);
     }
     i++;
   }
@@ -133,40 +142,16 @@ function buildPdfHtml(content, reportName) {
   const bodyHtml = markdownToHtml(content);
   return `<!DOCTYPE html>
 <html>
-<head>
-<meta charset="utf-8"/>
-<style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: Arial, sans-serif; font-size: 11px; color: #111827; padding: 32px 40px; line-height: 1.6; }
-  .pdf-header { background: #0f1b2d; color: #fff; padding: 24px 28px; border-radius: 8px; margin-bottom: 28px; }
-  .pdf-header h1 { font-size: 20px; font-weight: 900; color: #fff; border: none; margin: 0 0 4px; padding: 0; background: none; }
-  .pdf-header p { font-size: 12px; color: rgba(255,255,255,0.7); margin: 0; }
-  h1 { font-size: 16px; font-weight: 900; color: #0f1b2d; border-left: 5px solid #1a56db; padding: 8px 12px; background: #eff6ff; margin: 20px 0 12px; border-radius: 4px; }
-  h2 { font-size: 14px; font-weight: 800; color: #1e40af; border-left: 4px solid #2563eb; padding: 6px 10px; background: #f0f9ff; margin: 16px 0 10px; border-radius: 4px; }
-  h3 { font-size: 12px; font-weight: 700; color: #374151; margin: 12px 0 6px; }
-  p { margin: 4px 0 8px; font-size: 11px; }
-  ul { margin: 6px 0 10px 20px; }
-  li { margin-bottom: 4px; font-size: 11px; }
-  hr { border: none; border-top: 1px solid #e5e7eb; margin: 16px 0; }
-  table { width: 100%; border-collapse: collapse; margin: 10px 0 16px; font-size: 10.5px; }
-  th { background: #1a56db; color: #fff; font-weight: 700; padding: 7px 10px; text-align: left; border: 1px solid #1e40af; }
-  td { padding: 6px 10px; border: 1px solid #d1d5db; vertical-align: top; }
-  tr:nth-child(even) td { background: #f8fafc; }
-  tr:nth-child(odd) td { background: #ffffff; }
-  strong { font-weight: 700; }
-  .pdf-footer { margin-top: 32px; padding-top: 12px; border-top: 1px solid #e5e7eb; font-size: 9px; color: #9ca3af; text-align: center; }
-</style>
-</head>
-<body>
-<div class="pdf-header">
-  <h1>FMS AI AgentCore - Audit Planning Report</h1>
-  <p>Document: ${reportName} | Generated: ${new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" })}</p>
-  <p>Prepared by Alif Technology - Enterprise Audit Intelligence Platform</p>
+<head><meta charset="utf-8"/></head>
+<body style="font-family:Arial,sans-serif;font-size:11px;color:#111827;padding:32px 40px;line-height:1.6;">
+<div style="background:#0f1b2d;color:#fff;padding:24px 28px;border-radius:8px;margin-bottom:28px;">
+  <div style="font-size:20px;font-weight:900;color:#fff;margin:0 0 4px;">FMS AI AgentCore - Audit Planning Report</div>
+  <div style="font-size:12px;color:rgba(255,255,255,0.7);margin:0;">Document: ${reportName} | Generated: ${new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" })}</div>
+  <div style="font-size:12px;color:rgba(255,255,255,0.7);">Prepared by Alif Technology - Enterprise Audit Intelligence Platform</div>
 </div>
 ${bodyHtml}
-<div class="pdf-footer">
-  This report was generated automatically by FMS AI AgentCore. It is intended for audit planning purposes only.
-  Alif Technology (c) ${new Date().getFullYear()}
+<div style="margin-top:32px;padding-top:12px;border-top:1px solid #e5e7eb;font-size:9px;color:#9ca3af;text-align:center;">
+  This report was generated automatically by FMS AI AgentCore. Alif Technology (c) ${new Date().getFullYear()}
 </div>
 </body>
 </html>`;
@@ -443,6 +428,23 @@ function App() {
       const htmlContent = buildPdfHtml(auditPlanContent, reportName);
       const filename    = `Audit_Plan_${reportName}_${new Date().toISOString().slice(0,10)}.pdf`;
 
+      // Create a hidden iframe to render HTML with styles properly
+      const iframe = document.createElement("iframe");
+      iframe.style.position = "fixed";
+      iframe.style.top = "-9999px";
+      iframe.style.left = "-9999px";
+      iframe.style.width = "794px";
+      iframe.style.height = "1123px";
+      iframe.style.border = "none";
+      document.body.appendChild(iframe);
+
+      const doc = iframe.contentDocument || iframe.contentWindow.document;
+      doc.open();
+      doc.write(htmlContent);
+      doc.close();
+
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
       await html2pdf()
         .set({
           margin:      [10, 10, 10, 10],
@@ -452,8 +454,10 @@ function App() {
           jsPDF:       { unit: "mm", format: "a4", orientation: "portrait" },
           pagebreak:   { mode: ["avoid-all", "css", "legacy"] },
         })
-        .from(htmlContent)
+        .from(iframe.contentDocument.body)
         .save();
+
+      document.body.removeChild(iframe);
     } catch (err) {
       console.error("PDF generation failed:", err);
       alert("PDF generation failed: " + err.message);
