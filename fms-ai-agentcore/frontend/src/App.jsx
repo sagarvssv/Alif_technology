@@ -1,6 +1,5 @@
 import Chatbot from "./components/Chatbot";
 import React, { useEffect, useRef, useState } from "react";
-import html2pdf from "html2pdf.js";
 import "./App.css";
 
 const API_BASE_URL =
@@ -66,16 +65,11 @@ function removeSourcesFromAnswer(answer = "") {
     .trim();
 }
 
-// ─── Markdown → HTML for PDF ──────────────────────────────────────────
+// ─── Markdown → HTML ──────────────────────────────────────────────────
 function markdownToHtml(markdown = "") {
   const lines  = markdown.split("\n");
   const output = [];
   let i = 0;
-
-  const parseTableRow = (row, tag) => {
-    const cells = row.split("|").map((c) => c.trim()).filter(Boolean);
-    return "<tr>" + cells.map((c) => `<${tag} style="padding:7px 10px;border:1px solid ${tag === "th" ? "#1e40af" : "#d1d5db"};background:${tag === "th" ? "#1a56db" : "transparent"};color:${tag === "th" ? "#fff" : "#111827"};font-weight:${tag === "th" ? "700" : "400"};text-align:left;vertical-align:top;">${c}</${tag}>`).join("") + "</tr>";
-  };
 
   const isSeparator = (line) => /^\|[\s\-:|]+\|/.test(line.trim());
   const isTableRow  = (line) => line.trim().startsWith("|") && line.trim().endsWith("|");
@@ -83,75 +77,176 @@ function markdownToHtml(markdown = "") {
   while (i < lines.length) {
     const line = lines[i].trim();
 
+    // Table
     if (isTableRow(lines[i]) && i + 1 < lines.length && isSeparator(lines[i + 1])) {
-      const headerRow = lines[i];
+      const headerCells = lines[i].split("|").map((c) => c.trim()).filter(Boolean);
       i += 2;
       const bodyRows = [];
       while (i < lines.length && isTableRow(lines[i])) {
-        bodyRows.push(lines[i]);
+        bodyRows.push(lines[i].split("|").map((c) => c.trim()).filter(Boolean));
         i++;
       }
 
-      const evenStyle = "background:#f8fafc;";
-      const oddStyle  = "background:#ffffff;";
-
-      let table = `<table style="width:100%;border-collapse:collapse;margin:10px 0 16px;font-size:10.5px;">`;
-      table += `<thead>${parseTableRow(headerRow, "th")}</thead>`;
-      table += `<tbody>`;
-      bodyRows.forEach((r, idx) => {
-        const bgStyle = idx % 2 === 0 ? evenStyle : oddStyle;
-        const cells = r.split("|").map((c) => c.trim()).filter(Boolean);
-        table += `<tr style="${bgStyle}">` + cells.map((c) => `<td style="padding:6px 10px;border:1px solid #d1d5db;vertical-align:top;">${c}</td>`).join("") + "</tr>";
+      let t = `<table><thead><tr>`;
+      headerCells.forEach((c) => { t += `<th>${c}</th>`; });
+      t += `</tr></thead><tbody>`;
+      bodyRows.forEach((row) => {
+        t += `<tr>`;
+        row.forEach((c) => { t += `<td>${c}</td>`; });
+        t += `</tr>`;
       });
-      table += `</tbody></table>`;
-      output.push(table);
+      t += `</tbody></table>`;
+      output.push(t);
       continue;
     }
 
-    if (line.startsWith("### ")) {
-      output.push(`<h3 style="font-size:12px;font-weight:700;color:#374151;margin:12px 0 6px;">${line.slice(4)}</h3>`);
-    } else if (line.startsWith("## ")) {
-      output.push(`<h2 style="font-size:14px;font-weight:800;color:#1e40af;border-left:4px solid #2563eb;padding:6px 10px;background:#f0f9ff;margin:16px 0 10px;border-radius:4px;">${line.slice(3)}</h2>`);
-    } else if (line.startsWith("# ")) {
-      output.push(`<h1 style="font-size:16px;font-weight:900;color:#0f1b2d;border-left:5px solid #1a56db;padding:8px 12px;background:#eff6ff;margin:20px 0 12px;border-radius:4px;">${line.slice(2)}</h1>`);
-    } else if (line === "---") {
-      output.push(`<hr style="border:none;border-top:1px solid #e5e7eb;margin:16px 0;"/>`);
-    } else if (line.startsWith("- ")) {
+    if (line.startsWith("### "))      output.push(`<h3>${line.slice(4)}</h3>`);
+    else if (line.startsWith("## "))  output.push(`<h2>${line.slice(3)}</h2>`);
+    else if (line.startsWith("# "))   output.push(`<h1>${line.slice(2)}</h1>`);
+    else if (line === "---")          output.push(`<hr/>`);
+    else if (line.startsWith("- ")) {
       const items = [];
       while (i < lines.length && lines[i].trim().startsWith("- ")) {
-        items.push(`<li style="margin-bottom:4px;font-size:11px;">${lines[i].trim().slice(2)}</li>`);
+        items.push(`<li>${lines[i].trim().slice(2).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")}</li>`);
         i++;
       }
-      output.push(`<ul style="margin:6px 0 10px 20px;">${items.join("")}</ul>`);
+      output.push(`<ul>${items.join("")}</ul>`);
       continue;
     } else if (line === "") {
-      output.push("");
+      output.push(`<br/>`);
     } else {
-      let text = line
+      const text = line
         .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
         .replace(/\*(.+?)\*/g, "<em>$1</em>");
-      output.push(`<p style="margin:4px 0 8px;font-size:11px;">${text}</p>`);
+      output.push(`<p>${text}</p>`);
     }
     i++;
   }
-
   return output.join("\n");
 }
 
 function buildPdfHtml(content, reportName) {
-  const bodyHtml = markdownToHtml(content);
+  const body = markdownToHtml(content);
+  const date = new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" });
+  const year = new Date().getFullYear();
+
   return `<!DOCTYPE html>
 <html>
-<head><meta charset="utf-8"/></head>
-<body style="font-family:Arial,sans-serif;font-size:11px;color:#111827;padding:32px 40px;line-height:1.6;">
-<div style="background:#0f1b2d;color:#fff;padding:24px 28px;border-radius:8px;margin-bottom:28px;">
-  <div style="font-size:20px;font-weight:900;color:#fff;margin:0 0 4px;">FMS AI AgentCore - Audit Planning Report</div>
-  <div style="font-size:12px;color:rgba(255,255,255,0.7);margin:0;">Document: ${reportName} | Generated: ${new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" })}</div>
-  <div style="font-size:12px;color:rgba(255,255,255,0.7);">Prepared by Alif Technology - Enterprise Audit Intelligence Platform</div>
+<head>
+<meta charset="utf-8"/>
+<title>Audit Plan - ${reportName}</title>
+<style>
+  @media print {
+    body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: Arial, Helvetica, sans-serif;
+    font-size: 11pt;
+    color: #111827;
+    padding: 20mm 15mm;
+    line-height: 1.6;
+  }
+  .header {
+    background: #0f1b2d !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+    color: white;
+    padding: 20px 24px;
+    border-radius: 8px;
+    margin-bottom: 24px;
+  }
+  .header-title {
+    font-size: 18pt;
+    font-weight: 900;
+    color: white;
+    margin-bottom: 6px;
+  }
+  .header-sub {
+    font-size: 10pt;
+    color: rgba(255,255,255,0.75);
+  }
+  h1 {
+    font-size: 14pt;
+    font-weight: 900;
+    color: #0f1b2d;
+    background: #dbeafe !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+    border-left: 5px solid #1d4ed8;
+    padding: 8px 12px;
+    margin: 20px 0 10px;
+    border-radius: 4px;
+  }
+  h2 {
+    font-size: 12pt;
+    font-weight: 800;
+    color: #1e40af;
+    background: #eff6ff !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+    border-left: 4px solid #2563eb;
+    padding: 6px 10px;
+    margin: 14px 0 8px;
+    border-radius: 4px;
+  }
+  h3 {
+    font-size: 11pt;
+    font-weight: 700;
+    color: #374151;
+    margin: 10px 0 6px;
+  }
+  p { margin: 4px 0 8px; font-size: 10pt; }
+  ul { margin: 6px 0 10px 20px; }
+  li { margin-bottom: 4px; font-size: 10pt; }
+  hr { border: none; border-top: 1px solid #d1d5db; margin: 14px 0; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 10px 0 16px;
+    font-size: 9.5pt;
+    page-break-inside: avoid;
+  }
+  th {
+    background: #1d4ed8 !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+    color: white !important;
+    font-weight: 700;
+    padding: 7px 10px;
+    text-align: left;
+    border: 1px solid #1e40af;
+  }
+  td {
+    padding: 6px 10px;
+    border: 1px solid #d1d5db;
+    vertical-align: top;
+    background: white;
+  }
+  tr:nth-child(even) td {
+    background: #f8fafc !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .footer {
+    margin-top: 30px;
+    padding-top: 10px;
+    border-top: 1px solid #e5e7eb;
+    font-size: 8pt;
+    color: #9ca3af;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="header-title">FMS AI AgentCore — Audit Planning Report</div>
+  <div class="header-sub">Document: ${reportName}</div>
+  <div class="header-sub">Generated: ${date} &nbsp;|&nbsp; Prepared by Alif Technology</div>
 </div>
-${bodyHtml}
-<div style="margin-top:32px;padding-top:12px;border-top:1px solid #e5e7eb;font-size:9px;color:#9ca3af;text-align:center;">
-  This report was generated automatically by FMS AI AgentCore. Alif Technology (c) ${new Date().getFullYear()}
+${body}
+<div class="footer">
+  Generated automatically by FMS AI AgentCore. For audit planning purposes only. &copy; Alif Technology ${year}
 </div>
 </body>
 </html>`;
@@ -219,7 +314,6 @@ function App() {
   const [processingProgress, setProcessingProgress] = useState(0);
   const [preGeneratedReport, setPreGeneratedReport] = useState(null);
   const [preGenerating,      setPreGenerating]      = useState(false);
-  const [downloading,        setDownloading]        = useState(false);
 
   const [loadingReports, setLoadingReports] = useState(false);
   const [uploading,      setUploading]      = useState(false);
@@ -417,53 +511,26 @@ function App() {
     setView(VIEW_MANAGER_CHAT);
   }
 
-  async function handleDownloadAuditPlan() {
+  // ── Download as PDF using browser print ──────────────────────────────
+  function handleDownloadAuditPlan() {
     if (!auditPlanContent) {
       alert("Please wait for the audit plan to generate first.");
       return;
     }
-    setDownloading(true);
-    try {
-      const reportName  = getReportName(selectedReport);
-      const htmlContent = buildPdfHtml(auditPlanContent, reportName);
-      const filename    = `Audit_Plan_${reportName}_${new Date().toISOString().slice(0,10)}.pdf`;
-
-      // Create a hidden iframe to render HTML with styles properly
-      const iframe = document.createElement("iframe");
-      iframe.style.position = "fixed";
-      iframe.style.top = "-9999px";
-      iframe.style.left = "-9999px";
-      iframe.style.width = "794px";
-      iframe.style.height = "1123px";
-      iframe.style.border = "none";
-      document.body.appendChild(iframe);
-
-      const doc = iframe.contentDocument || iframe.contentWindow.document;
-      doc.open();
-      doc.write(htmlContent);
-      doc.close();
-
-      await new Promise((resolve) => setTimeout(resolve, 500));
-
-      await html2pdf()
-        .set({
-          margin:      [10, 10, 10, 10],
-          filename,
-          image:       { type: "jpeg", quality: 0.98 },
-          html2canvas: { scale: 2, useCORS: true, logging: false, allowTaint: true },
-          jsPDF:       { unit: "mm", format: "a4", orientation: "portrait" },
-          pagebreak:   { mode: ["avoid-all", "css", "legacy"] },
-        })
-        .from(iframe.contentDocument.body)
-        .save();
-
-      document.body.removeChild(iframe);
-    } catch (err) {
-      console.error("PDF generation failed:", err);
-      alert("PDF generation failed: " + err.message);
-    } finally {
-      setDownloading(false);
+    const reportName  = getReportName(selectedReport);
+    const htmlContent = buildPdfHtml(auditPlanContent, reportName);
+    const printWindow = window.open("", "_blank", "width=900,height=700");
+    if (!printWindow) {
+      alert("Please allow popups for this site to download the PDF.");
+      return;
     }
+    printWindow.document.open();
+    printWindow.document.write(htmlContent);
+    printWindow.document.close();
+    printWindow.focus();
+    setTimeout(() => {
+      printWindow.print();
+    }, 800);
   }
 
   useEffect(() => { return () => stopPolling(); }, []);
@@ -589,8 +656,8 @@ function App() {
             <div className="topbar-report-pill">
               <span className="pill-icon">📑</span>
               <span className="pill-name">{getReportName(selectedReport)}</span>
-              <button className="pill-btn" onClick={handleDownloadAuditPlan} disabled={downloading}>
-                {downloading ? "Generating PDF..." : "Download PDF"}
+              <button className="pill-btn" onClick={handleDownloadAuditPlan}>
+                Download PDF
               </button>
             </div>
           )}
