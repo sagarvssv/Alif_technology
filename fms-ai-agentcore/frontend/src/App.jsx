@@ -1,5 +1,6 @@
 import Chatbot from "./components/Chatbot";
 import React, { useEffect, useRef, useState } from "react";
+import html2pdf from "html2pdf.js";
 import "./App.css";
 
 const API_BASE_URL =
@@ -82,26 +83,22 @@ function markdownToHtml(markdown = "") {
   while (i < lines.length) {
     const line = lines[i].trim();
 
-    // Table detection
     if (isTableRow(lines[i]) && i + 1 < lines.length && isSeparator(lines[i + 1])) {
       const headerRow = lines[i];
-      i += 2; // skip header + separator
-
+      i += 2;
       const bodyRows = [];
       while (i < lines.length && isTableRow(lines[i])) {
         bodyRows.push(lines[i]);
         i++;
       }
-
-      let table = '<table>';
-      table += '<thead>' + parseTableRow(headerRow, "th") + '</thead>';
-      table += '<tbody>' + bodyRows.map((r) => parseTableRow(r, "td")).join("") + '</tbody>';
-      table += '</table>';
+      let table = "<table>";
+      table += "<thead>" + parseTableRow(headerRow, "th") + "</thead>";
+      table += "<tbody>" + bodyRows.map((r) => parseTableRow(r, "td")).join("") + "</tbody>";
+      table += "</table>";
       output.push(table);
       continue;
     }
 
-    // Headings
     if (line.startsWith("### ")) {
       output.push(`<h3>${line.slice(4)}</h3>`);
     } else if (line.startsWith("## ")) {
@@ -111,7 +108,6 @@ function markdownToHtml(markdown = "") {
     } else if (line === "---") {
       output.push("<hr/>");
     } else if (line.startsWith("- ")) {
-      // Collect consecutive list items
       const items = [];
       while (i < lines.length && lines[i].trim().startsWith("- ")) {
         items.push(`<li>${lines[i].trim().slice(2)}</li>`);
@@ -122,13 +118,11 @@ function markdownToHtml(markdown = "") {
     } else if (line === "") {
       output.push("");
     } else {
-      // Apply inline formatting
       let text = line
         .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
         .replace(/\*(.+?)\*/g, "<em>$1</em>");
       output.push(`<p>${text}</p>`);
     }
-
     i++;
   }
 
@@ -445,10 +439,9 @@ function App() {
     }
     setDownloading(true);
     try {
-      const html2pdf   = (await import("html2pdf.js")).default;
-      const reportName = getReportName(selectedReport);
+      const reportName  = getReportName(selectedReport);
       const htmlContent = buildPdfHtml(auditPlanContent, reportName);
-      const filename   = `Audit_Plan_${reportName}_${new Date().toISOString().slice(0,10)}.pdf`;
+      const filename    = `Audit_Plan_${reportName}_${new Date().toISOString().slice(0,10)}.pdf`;
 
       await html2pdf()
         .set({
