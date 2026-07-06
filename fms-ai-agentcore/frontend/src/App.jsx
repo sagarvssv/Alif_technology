@@ -68,20 +68,12 @@ function removeSourcesFromAnswer(answer = "") {
 // ─── Markdown → HTML for PDF ──────────────────────────────────────────
 function markdownToHtml(markdown = "") {
   let html = markdown;
-
-  // H1
   html = html.replace(/^# (.+)$/gm, "<h1>$1</h1>");
-  // H2
   html = html.replace(/^## (.+)$/gm, "<h2>$1</h2>");
-  // H3
   html = html.replace(/^### (.+)$/gm, "<h3>$1</h3>");
-
-  // Bold
   html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-  // Italic
   html = html.replace(/\*(.+?)\*/g, "<em>$1</em>");
 
-  // Tables
   const tableRegex = /(\|.+\|\n)((?:\|[-: ]+\|\n))((?:\|.+\|\n?)*)/gm;
   html = html.replace(tableRegex, (match, headerRow, separatorRow, bodyRows) => {
     const parseRow = (row, tag) => {
@@ -94,166 +86,57 @@ function markdownToHtml(markdown = "") {
     return `<table>${thead}${tbody}</table>`;
   });
 
-  // Bullet points
   html = html.replace(/^- (.+)$/gm, "<li>$1</li>");
   html = html.replace(/(<li>.*<\/li>\n?)+/g, (match) => `<ul>${match}</ul>`);
-
-  // Horizontal rule
   html = html.replace(/^---$/gm, "<hr/>");
-
-  // Paragraphs — wrap remaining lines
   html = html.replace(/^(?!<[hultHULT]).+$/gm, (line) => {
     const trimmed = line.trim();
     if (!trimmed) return "";
     return `<p>${trimmed}</p>`;
   });
-
-  // Clean up blank lines
   html = html.replace(/\n{2,}/g, "\n");
-
   return html;
 }
 
 function buildPdfHtml(content, reportName) {
   const bodyHtml = markdownToHtml(content);
-  return `
-<!DOCTYPE html>
+  return `<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8"/>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    font-family: Arial, sans-serif;
-    font-size: 11px;
-    color: #111827;
-    padding: 32px 40px;
-    line-height: 1.6;
-  }
-
-  /* Cover header */
-  .pdf-header {
-    background: #0f1b2d;
-    color: #fff;
-    padding: 24px 28px;
-    border-radius: 8px;
-    margin-bottom: 28px;
-  }
-  .pdf-header h1 {
-    font-size: 20px;
-    font-weight: 900;
-    color: #fff;
-    border: none;
-    margin: 0 0 4px;
-    padding: 0;
-    background: none;
-  }
-  .pdf-header p {
-    font-size: 12px;
-    color: rgba(255,255,255,0.7);
-    margin: 0;
-  }
-
-  h1 {
-    font-size: 16px;
-    font-weight: 900;
-    color: #0f1b2d;
-    border-left: 5px solid #1a56db;
-    padding: 8px 12px;
-    background: #eff6ff;
-    margin: 20px 0 12px;
-    border-radius: 4px;
-  }
-  h2 {
-    font-size: 14px;
-    font-weight: 800;
-    color: #1e40af;
-    border-left: 4px solid #2563eb;
-    padding: 6px 10px;
-    background: #f0f9ff;
-    margin: 16px 0 10px;
-    border-radius: 4px;
-  }
-  h3 {
-    font-size: 12px;
-    font-weight: 700;
-    color: #374151;
-    margin: 12px 0 6px;
-  }
-
-  p {
-    margin: 4px 0 8px;
-    font-size: 11px;
-  }
-
-  ul {
-    margin: 6px 0 10px 20px;
-  }
-  li {
-    margin-bottom: 4px;
-    font-size: 11px;
-  }
-
-  hr {
-    border: none;
-    border-top: 1px solid #e5e7eb;
-    margin: 16px 0;
-  }
-
-  /* Tables */
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    margin: 10px 0 16px;
-    font-size: 10.5px;
-  }
-  th {
-    background: #1a56db;
-    color: #fff;
-    font-weight: 700;
-    padding: 7px 10px;
-    text-align: left;
-    border: 1px solid #1e40af;
-  }
-  td {
-    padding: 6px 10px;
-    border: 1px solid #d1d5db;
-    vertical-align: top;
-  }
-  tr:nth-child(even) td {
-    background: #f8fafc;
-  }
-  tr:nth-child(odd) td {
-    background: #ffffff;
-  }
-
+  body { font-family: Arial, sans-serif; font-size: 11px; color: #111827; padding: 32px 40px; line-height: 1.6; }
+  .pdf-header { background: #0f1b2d; color: #fff; padding: 24px 28px; border-radius: 8px; margin-bottom: 28px; }
+  .pdf-header h1 { font-size: 20px; font-weight: 900; color: #fff; border: none; margin: 0 0 4px; padding: 0; background: none; }
+  .pdf-header p { font-size: 12px; color: rgba(255,255,255,0.7); margin: 0; }
+  h1 { font-size: 16px; font-weight: 900; color: #0f1b2d; border-left: 5px solid #1a56db; padding: 8px 12px; background: #eff6ff; margin: 20px 0 12px; border-radius: 4px; }
+  h2 { font-size: 14px; font-weight: 800; color: #1e40af; border-left: 4px solid #2563eb; padding: 6px 10px; background: #f0f9ff; margin: 16px 0 10px; border-radius: 4px; }
+  h3 { font-size: 12px; font-weight: 700; color: #374151; margin: 12px 0 6px; }
+  p { margin: 4px 0 8px; font-size: 11px; }
+  ul { margin: 6px 0 10px 20px; }
+  li { margin-bottom: 4px; font-size: 11px; }
+  hr { border: none; border-top: 1px solid #e5e7eb; margin: 16px 0; }
+  table { width: 100%; border-collapse: collapse; margin: 10px 0 16px; font-size: 10.5px; }
+  th { background: #1a56db; color: #fff; font-weight: 700; padding: 7px 10px; text-align: left; border: 1px solid #1e40af; }
+  td { padding: 6px 10px; border: 1px solid #d1d5db; vertical-align: top; }
+  tr:nth-child(even) td { background: #f8fafc; }
+  tr:nth-child(odd) td { background: #ffffff; }
   strong { font-weight: 700; }
-
-  .pdf-footer {
-    margin-top: 32px;
-    padding-top: 12px;
-    border-top: 1px solid #e5e7eb;
-    font-size: 9px;
-    color: #9ca3af;
-    text-align: center;
-  }
+  .pdf-footer { margin-top: 32px; padding-top: 12px; border-top: 1px solid #e5e7eb; font-size: 9px; color: #9ca3af; text-align: center; }
 </style>
 </head>
 <body>
-
 <div class="pdf-header">
-  <h1>FMS AI AgentCore — Audit Planning Report</h1>
-  <p>Document: ${reportName} &nbsp;|&nbsp; Generated: ${new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" })}</p>
-  <p>Prepared by Alif Technology — Enterprise Audit Intelligence Platform</p>
+  <h1>FMS AI AgentCore - Audit Planning Report</h1>
+  <p>Document: ${reportName} | Generated: ${new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" })}</p>
+  <p>Prepared by Alif Technology - Enterprise Audit Intelligence Platform</p>
 </div>
-
 ${bodyHtml}
-
 <div class="pdf-footer">
   This report was generated automatically by FMS AI AgentCore. It is intended for audit planning purposes only.
-  Alif Technology © ${new Date().getFullYear()}
+  Alif Technology (c) ${new Date().getFullYear()}
 </div>
-
 </body>
 </html>`;
 }
@@ -263,18 +146,18 @@ function ProcessingProgress({ progress }) {
   return (
     <div className="processing-progress-wrap">
       <div className="processing-progress-header">
-        <span>⏳ Processing document…</span>
+        <span>Processing document...</span>
         <span className="processing-pct">{progress}%</span>
       </div>
       <div className="processing-progress-track">
         <div className="processing-progress-fill" style={{ width: `${progress}%` }} />
       </div>
       <div className="processing-progress-label">
-        {progress < 30  && "Uploading to secure storage…"}
-        {progress >= 30 && progress < 60  && "Extracting text from document…"}
-        {progress >= 60 && progress < 85  && "Analysing financial data…"}
-        {progress >= 85 && progress < 100 && "Finalising — almost ready…"}
-        {progress >= 100 && "✅ Document ready!"}
+        {progress < 30  && "Uploading to secure storage..."}
+        {progress >= 30 && progress < 60  && "Extracting text from document..."}
+        {progress >= 60 && progress < 85  && "Analysing financial data..."}
+        {progress >= 85 && progress < 100 && "Finalising - almost ready..."}
+        {progress >= 100 && "Document ready!"}
       </div>
     </div>
   );
@@ -362,7 +245,6 @@ function App() {
         }),
       });
       const data = await res.json();
-
       if (data.status === "processing" && data.jobId) {
         for (let attempt = 0; attempt < 60; attempt++) {
           await sleep(2500);
@@ -527,34 +409,25 @@ function App() {
     }
     setDownloading(true);
     try {
-      const html2pdf = (await import("html2pdf.js")).default;
+      const html2pdf   = (await import("html2pdf.js")).default;
       const reportName = getReportName(selectedReport);
       const htmlContent = buildPdfHtml(auditPlanContent, reportName);
-
-      const container = document.createElement("div");
-      container.innerHTML = htmlContent;
-      container.style.position = "absolute";
-      container.style.left = "-9999px";
-      document.body.appendChild(container);
-
-      const filename = `Audit_Plan_${reportName}_${new Date().toISOString().slice(0,10)}.pdf`;
+      const filename   = `Audit_Plan_${reportName}_${new Date().toISOString().slice(0,10)}.pdf`;
 
       await html2pdf()
         .set({
-          margin:       [10, 10, 10, 10],
+          margin:      [10, 10, 10, 10],
           filename,
-          image:        { type: "jpeg", quality: 0.98 },
-          html2canvas:  { scale: 2, useCORS: true, logging: false },
-          jsPDF:        { unit: "mm", format: "a4", orientation: "portrait" },
-          pagebreak:    { mode: ["avoid-all", "css", "legacy"] },
+          image:       { type: "jpeg", quality: 0.98 },
+          html2canvas: { scale: 2, useCORS: true, logging: false, allowTaint: true },
+          jsPDF:       { unit: "mm", format: "a4", orientation: "portrait" },
+          pagebreak:   { mode: ["avoid-all", "css", "legacy"] },
         })
-        .from(container)
+        .from(htmlContent)
         .save();
-
-      document.body.removeChild(container);
     } catch (err) {
       console.error("PDF generation failed:", err);
-      alert("PDF generation failed. Please try again.");
+      alert("PDF generation failed: " + err.message);
     } finally {
       setDownloading(false);
     }
@@ -615,7 +488,7 @@ function App() {
         </div>
 
         <button className="new-chat-btn" onClick={startNewChat}>
-          <span className="new-chat-icon">＋</span>
+          <span className="new-chat-icon">+</span>
           <span className="new-chat-label">New Chat</span>
         </button>
 
@@ -626,7 +499,7 @@ function App() {
               onChange={handleUpload} disabled={uploading || processing} />
             <span className="sidebar-upload-icon">📄</span>
             <span className="sidebar-upload-label">
-              {uploading ? "Uploading…" : processing ? "Processing…" : "Upload Document"}
+              {uploading ? "Uploading..." : processing ? "Processing..." : "Upload Document"}
             </span>
           </label>
         )}
@@ -634,7 +507,7 @@ function App() {
         {portal === "manager" && (
           <div className="sidebar-section">
             <div className="sidebar-section-title">All Documents</div>
-            {loadingReports && <p className="sidebar-muted">Loading…</p>}
+            {loadingReports && <p className="sidebar-muted">Loading...</p>}
             {!loadingReports && reports.length === 0 && (
               <p className="sidebar-muted">No documents uploaded yet.</p>
             )}
@@ -659,7 +532,7 @@ function App() {
         <div style={{ marginTop: "auto" }}>
           <button className="switch-portal-btn"
             onClick={() => { setView(VIEW_PORTAL); setPortal(null); }}>
-            ← Switch Portal
+            Switch Portal
           </button>
         </div>
       </aside>
@@ -685,9 +558,8 @@ function App() {
             <div className="topbar-report-pill">
               <span className="pill-icon">📑</span>
               <span className="pill-name">{getReportName(selectedReport)}</span>
-              <button className="pill-btn" onClick={handleDownloadAuditPlan}
-                disabled={downloading}>
-                {downloading ? "⏳ Generating PDF…" : "⬇ Download PDF"}
+              <button className="pill-btn" onClick={handleDownloadAuditPlan} disabled={downloading}>
+                {downloading ? "Generating PDF..." : "Download PDF"}
               </button>
             </div>
           )}
@@ -738,7 +610,7 @@ function App() {
                 <div className="option-arrow">→</div>
               </button>
             </div>
-            {uploading && <div className="home-status">⬆️ Uploading your document…</div>}
+            {uploading && <div className="home-status">Uploading your document...</div>}
           </div>
         )}
 
@@ -753,7 +625,7 @@ function App() {
                 The AI will answer based on that specific document only.
               </p>
             </div>
-            {loadingReports && <p className="manager-loading">Loading documents…</p>}
+            {loadingReports && <p className="manager-loading">Loading documents...</p>}
             {!loadingReports && reports.length === 0 && (
               <div className="manager-empty">
                 <div className="manager-empty-icon">📭</div>
@@ -771,7 +643,7 @@ function App() {
                       <div className="manager-doc-name">{getReportName(r)}</div>
                       <div className="manager-doc-date">{formatDate(r.createdAt || r.created_at)}</div>
                       <div className={`manager-doc-status ${done ? "status-done" : "status-pending"}`}>
-                        {done ? "✅ Ready" : "⏳ Processing"}
+                        {done ? "✅ Ready" : "Processing"}
                       </div>
                     </div>
                     <div className="manager-doc-open">Open →</div>
@@ -832,7 +704,7 @@ function App() {
                   </div>
                   {agent.available ? (
                     <div className="sub-agent-status-pill">
-                      {preGenerating  && <span className="status-pill generating">⏳ Preparing…</span>}
+                      {preGenerating  && <span className="status-pill generating">Preparing...</span>}
                       {!preGenerating && preGeneratedReport  && <span className="status-pill ready">✅ Ready</span>}
                       {!preGenerating && !preGeneratedReport && <span className="status-pill pending">→</span>}
                     </div>
@@ -847,7 +719,7 @@ function App() {
               <input ref={fileInputRef} type="file"
                 accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg"
                 onChange={handleUpload} disabled={uploading || processing} />
-              {uploading ? "Uploading…" : processing ? "Processing…" : "⬆ Upload Another Document"}
+              {uploading ? "Uploading..." : processing ? "Processing..." : "Upload Another Document"}
             </label>
           </div>
         )}
