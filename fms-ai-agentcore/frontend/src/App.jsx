@@ -15,7 +15,6 @@ const VIEW_PORTAL       = "portal";
 const VIEW_HOME         = "home";
 const VIEW_UPLOAD       = "upload";
 const VIEW_AGENT        = "agent";
-const VIEW_GENERAL      = "general";
 const VIEW_MANAGER_CHAT = "manager_chat";
 const VIEW_MANAGER_HOME = "manager_home";
 
@@ -30,9 +29,9 @@ const SUB_AGENTS = [
   {
     id:          "fs_review_agent",
     label:       "Financial Statement Review Agent",
-    description: "Reviews financial statements for IFRS compliance, disclosure gaps, and presentation issues.",
+    description: "Reviews financial statements for IFRS compliance, missing disclosures, note consistency, classification, ratios, going concern, and related party disclosures.",
     icon:        "📊",
-    available:   false,
+    available:   true,
   },
   {
     id:          "tax_agent",
@@ -65,19 +64,14 @@ function removeSourcesFromAnswer(answer = "") {
     .trim();
 }
 
-// ─── Markdown → HTML ──────────────────────────────────────────────────
 function markdownToHtml(markdown = "") {
   const lines  = markdown.split("\n");
   const output = [];
   let i = 0;
-
   const isSeparator = (line) => /^\|[\s\-:|]+\|/.test(line.trim());
   const isTableRow  = (line) => line.trim().startsWith("|") && line.trim().endsWith("|");
-
   while (i < lines.length) {
     const line = lines[i].trim();
-
-    // Table
     if (isTableRow(lines[i]) && i + 1 < lines.length && isSeparator(lines[i + 1])) {
       const headerCells = lines[i].split("|").map((c) => c.trim()).filter(Boolean);
       i += 2;
@@ -86,20 +80,16 @@ function markdownToHtml(markdown = "") {
         bodyRows.push(lines[i].split("|").map((c) => c.trim()).filter(Boolean));
         i++;
       }
-
       let t = `<table><thead><tr>`;
       headerCells.forEach((c) => { t += `<th>${c}</th>`; });
       t += `</tr></thead><tbody>`;
       bodyRows.forEach((row) => {
-        t += `<tr>`;
-        row.forEach((c) => { t += `<td>${c}</td>`; });
-        t += `</tr>`;
+        t += `<tr>`; row.forEach((c) => { t += `<td>${c}</td>`; }); t += `</tr>`;
       });
       t += `</tbody></table>`;
       output.push(t);
       continue;
     }
-
     if (line.startsWith("### "))      output.push(`<h3>${line.slice(4)}</h3>`);
     else if (line.startsWith("## "))  output.push(`<h2>${line.slice(3)}</h2>`);
     else if (line.startsWith("# "))   output.push(`<h1>${line.slice(2)}</h1>`);
@@ -115,9 +105,7 @@ function markdownToHtml(markdown = "") {
     } else if (line === "") {
       output.push(`<br/>`);
     } else {
-      const text = line
-        .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-        .replace(/\*(.+?)\*/g, "<em>$1</em>");
+      const text = line.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/\*(.+?)\*/g, "<em>$1</em>");
       output.push(`<p>${text}</p>`);
     }
     i++;
@@ -129,127 +117,34 @@ function buildPdfHtml(content, reportName) {
   const body = markdownToHtml(content);
   const date = new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" });
   const year = new Date().getFullYear();
-
-  return `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8"/>
-<title>Audit Plan - ${reportName}</title>
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"/><title>Report - ${reportName}</title>
 <style>
-  @media print {
-    body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-  }
+  @media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    font-family: Arial, Helvetica, sans-serif;
-    font-size: 11pt;
-    color: #111827;
-    padding: 20mm 15mm;
-    line-height: 1.6;
-  }
-  .header {
-    background: #0f1b2d !important;
-    -webkit-print-color-adjust: exact;
-    print-color-adjust: exact;
-    color: white;
-    padding: 20px 24px;
-    border-radius: 8px;
-    margin-bottom: 24px;
-  }
-  .header-title {
-    font-size: 18pt;
-    font-weight: 900;
-    color: white;
-    margin-bottom: 6px;
-  }
-  .header-sub {
-    font-size: 10pt;
-    color: rgba(255,255,255,0.75);
-  }
-  h1 {
-    font-size: 14pt;
-    font-weight: 900;
-    color: #0f1b2d;
-    background: #dbeafe !important;
-    -webkit-print-color-adjust: exact;
-    print-color-adjust: exact;
-    border-left: 5px solid #1d4ed8;
-    padding: 8px 12px;
-    margin: 20px 0 10px;
-    border-radius: 4px;
-  }
-  h2 {
-    font-size: 12pt;
-    font-weight: 800;
-    color: #1e40af;
-    background: #eff6ff !important;
-    -webkit-print-color-adjust: exact;
-    print-color-adjust: exact;
-    border-left: 4px solid #2563eb;
-    padding: 6px 10px;
-    margin: 14px 0 8px;
-    border-radius: 4px;
-  }
-  h3 {
-    font-size: 11pt;
-    font-weight: 700;
-    color: #374151;
-    margin: 10px 0 6px;
-  }
+  body { font-family: Arial, Helvetica, sans-serif; font-size: 11pt; color: #111827; padding: 20mm 15mm; line-height: 1.6; }
+  .header { background: #0f1b2d !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; color: white; padding: 20px 24px; border-radius: 8px; margin-bottom: 24px; }
+  .header-title { font-size: 18pt; font-weight: 900; color: white; margin-bottom: 6px; }
+  .header-sub { font-size: 10pt; color: rgba(255,255,255,0.75); }
+  h1 { font-size: 14pt; font-weight: 900; color: #0f1b2d; background: #dbeafe !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; border-left: 5px solid #1d4ed8; padding: 8px 12px; margin: 20px 0 10px; border-radius: 4px; }
+  h2 { font-size: 12pt; font-weight: 800; color: #1e40af; background: #eff6ff !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; border-left: 4px solid #2563eb; padding: 6px 10px; margin: 14px 0 8px; border-radius: 4px; }
+  h3 { font-size: 11pt; font-weight: 700; color: #374151; margin: 10px 0 6px; }
   p { margin: 4px 0 8px; font-size: 10pt; }
-  ul { margin: 6px 0 10px 20px; }
-  li { margin-bottom: 4px; font-size: 10pt; }
+  ul { margin: 6px 0 10px 20px; } li { margin-bottom: 4px; font-size: 10pt; }
   hr { border: none; border-top: 1px solid #d1d5db; margin: 14px 0; }
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    margin: 10px 0 16px;
-    font-size: 9.5pt;
-    page-break-inside: avoid;
-  }
-  th {
-    background: #1d4ed8 !important;
-    -webkit-print-color-adjust: exact;
-    print-color-adjust: exact;
-    color: white !important;
-    font-weight: 700;
-    padding: 7px 10px;
-    text-align: left;
-    border: 1px solid #1e40af;
-  }
-  td {
-    padding: 6px 10px;
-    border: 1px solid #d1d5db;
-    vertical-align: top;
-    background: white;
-  }
-  tr:nth-child(even) td {
-    background: #f8fafc !important;
-    -webkit-print-color-adjust: exact;
-    print-color-adjust: exact;
-  }
-  .footer {
-    margin-top: 30px;
-    padding-top: 10px;
-    border-top: 1px solid #e5e7eb;
-    font-size: 8pt;
-    color: #9ca3af;
-    text-align: center;
-  }
-</style>
-</head>
-<body>
+  table { width: 100%; border-collapse: collapse; margin: 10px 0 16px; font-size: 9.5pt; page-break-inside: avoid; }
+  th { background: #1d4ed8 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; color: white !important; font-weight: 700; padding: 7px 10px; text-align: left; border: 1px solid #1e40af; }
+  td { padding: 6px 10px; border: 1px solid #d1d5db; vertical-align: top; background: white; }
+  tr:nth-child(even) td { background: #f8fafc !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .footer { margin-top: 30px; padding-top: 10px; border-top: 1px solid #e5e7eb; font-size: 8pt; color: #9ca3af; text-align: center; }
+</style></head><body>
 <div class="header">
-  <div class="header-title">FMS AI AgentCore — Audit Planning Report</div>
+  <div class="header-title">FMS AI AgentCore — Report</div>
   <div class="header-sub">Document: ${reportName}</div>
-  <div class="header-sub">Generated: ${date} &nbsp;|&nbsp; Prepared by Alif Technology</div>
+  <div class="header-sub">Generated: ${date} | Prepared by Alif Technology</div>
 </div>
 ${body}
-<div class="footer">
-  Generated automatically by FMS AI AgentCore. For audit planning purposes only. &copy; Alif Technology ${year}
-</div>
-</body>
-</html>`;
+<div class="footer">Generated automatically by FMS AI AgentCore. For audit planning purposes only. &copy; Alif Technology ${year}</div>
+</body></html>`;
 }
 
 // ─── Progress Bar ─────────────────────────────────────────────────────
@@ -285,16 +180,59 @@ function FinancialIcon() {
       <rect x="23" y="26" width="9" height="26" rx="2" fill="#1a56db" opacity="0.9"/>
       <rect x="36" y="18" width="9" height="34" rx="2" fill="#06b6d4" opacity="0.9"/>
       <rect x="49" y="10" width="9" height="42" rx="2" fill="#1a56db" opacity="0.9"/>
-      <polyline points="14,34 27,24 40,16 53,8"
-        stroke="#f59e0b" strokeWidth="2.5"
-        strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+      <polyline points="14,34 27,24 40,16 53,8" stroke="#f59e0b" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
       <circle cx="14" cy="34" r="3" fill="#f59e0b"/>
       <circle cx="27" cy="24" r="3" fill="#f59e0b"/>
       <circle cx="40" cy="16" r="3" fill="#f59e0b"/>
       <circle cx="53" cy="8"  r="3" fill="#f59e0b"/>
-      <text x="8" y="62" fontSize="9" fill="rgba(255,255,255,0.5)"
-        fontFamily="sans-serif" fontWeight="bold">AED</text>
+      <text x="8" y="62" fontSize="9" fill="rgba(255,255,255,0.5)" fontFamily="sans-serif" fontWeight="bold">AED</text>
     </svg>
+  );
+}
+
+// ─── Chat Popup ───────────────────────────────────────────────────────
+function ChatPopup() {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <>
+      {/* Floating button */}
+      <button
+        className="chat-popup-btn"
+        onClick={() => setOpen((o) => !o)}
+        title="Ask a question"
+      >
+        {open ? (
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        ) : (
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+          </svg>
+        )}
+        {!open && <span className="chat-popup-label">Ask a Question</span>}
+      </button>
+
+      {/* Popup window */}
+      {open && (
+        <div className="chat-popup-window">
+          <div className="chat-popup-header">
+            <div className="chat-popup-header-left">
+              <div className="chat-popup-avatar">AT</div>
+              <div>
+                <div className="chat-popup-title">FMS AI Assistant</div>
+                <div className="chat-popup-subtitle">UAE Finance & Audit Knowledge Base</div>
+              </div>
+            </div>
+            <button className="chat-popup-close" onClick={() => setOpen(false)}>✕</button>
+          </div>
+          <div className="chat-popup-body">
+            <Chatbot reportId={null} selectedReport={null} generalMode popupMode />
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -336,22 +274,21 @@ function App() {
     }, 4000);
   }
 
-  async function generateAuditPlanInBackground(reportId) {
+  async function generateAuditPlanInBackground(reportId, agentId = "audit_planning_agent") {
     setPreGenerating(true);
     setPreGeneratedReport(null);
     try {
+      const message = agentId === "fs_review_agent"
+        ? "Generate financial statement review."
+        : "Generate audit planning.";
       const res = await fetch(CHAT_API, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          message:       "Generate audit planning.",
-          question:      "Generate audit planning.",
-          sessionId:     `bg-${Date.now()}`,
-          reportId,
-          selectedAgent: "audit_planning_agent",
-          agent:         "audit_planning_agent",
-          generalMode:   false,
-          general_mode:  false,
+          message, question: message,
+          sessionId: `bg-${Date.now()}`,
+          reportId, selectedAgent: agentId, agent: agentId,
+          generalMode: false, general_mode: false,
         }),
       });
       const data = await res.json();
@@ -365,15 +302,11 @@ function App() {
             if (statusData.status === "failed") throw new Error(statusData.error);
           } catch {}
         }
-      } else {
-        setPreGeneratedReport(data);
-      }
+      } else { setPreGeneratedReport(data); }
     } catch (err) {
       console.error("BG_GENERATE_FAILED:", err.message);
       setPreGeneratedReport(null);
-    } finally {
-      setPreGenerating(false);
-    }
+    } finally { setPreGenerating(false); }
   }
 
   async function fetchReports() {
@@ -422,7 +355,7 @@ function App() {
             setSelectedReport(latest);
             setSelectedReportId(latestId);
             setView(VIEW_UPLOAD);
-            generateAuditPlanInBackground(latestId);
+            generateAuditPlanInBackground(latestId, "audit_planning_agent");
           }, 800);
         }
         if (attempts >= 60) { stopPolling(); setProcessing(false); setProcessingProgress(0); }
@@ -439,7 +372,6 @@ function App() {
       setPreGeneratedReport(null);
       setPreGenerating(false);
       const prevId = getReportId(selectedReport);
-
       const urlRes    = await fetch(UPLOAD_URL_API, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -448,16 +380,13 @@ function App() {
       const urlData   = await urlRes.json();
       const uploadUrl = urlData.uploadUrl || urlData.upload_url || urlData.url || urlData.presignedUrl;
       if (!uploadUrl) throw new Error("Upload URL not returned");
-
       await fetch(uploadUrl, {
         method: "PUT",
         headers: { "Content-Type": file.type || "application/pdf" },
         body: file,
       });
-
       if (fileInputRef.current)   fileInputRef.current.value   = "";
       if (sidebarFileRef.current) sidebarFileRef.current.value = "";
-
       setUploading(false);
       setProcessing(true);
       setView(VIEW_UPLOAD);
@@ -496,7 +425,11 @@ function App() {
     if (!agent.available) return;
     setSelectedAgent(agent);
     setAuditPlanContent("");
+    setPreGeneratedReport(null);
     setView(VIEW_AGENT);
+    if (selectedReportId) {
+      generateAuditPlanInBackground(selectedReportId, agent.id);
+    }
   }
 
   async function openManagerChat(report) {
@@ -511,30 +444,25 @@ function App() {
     setView(VIEW_MANAGER_CHAT);
   }
 
-  // ── Download as PDF using browser print ──────────────────────────────
   function handleDownloadAuditPlan() {
     if (!auditPlanContent) {
-      alert("Please wait for the audit plan to generate first.");
+      alert("Please wait for the report to generate first.");
       return;
     }
     const reportName  = getReportName(selectedReport);
     const htmlContent = buildPdfHtml(auditPlanContent, reportName);
     const printWindow = window.open("", "_blank", "width=900,height=700");
-    if (!printWindow) {
-      alert("Please allow popups for this site to download the PDF.");
-      return;
-    }
+    if (!printWindow) { alert("Please allow popups for this site to download the PDF."); return; }
     printWindow.document.open();
     printWindow.document.write(htmlContent);
     printWindow.document.close();
     printWindow.focus();
-    setTimeout(() => {
-      printWindow.print();
-    }, 800);
+    setTimeout(() => { printWindow.print(); }, 800);
   }
 
   useEffect(() => { return () => stopPolling(); }, []);
 
+  // ── PORTAL SELECTION ─────────────────────────────────────────────────
   if (view === VIEW_PORTAL) {
     return (
       <div className="portal-screen">
@@ -549,10 +477,7 @@ function App() {
             <div className="portal-card-icon">👤</div>
             <div className="portal-card-body">
               <div className="portal-card-title">User Portal</div>
-              <div className="portal-card-desc">
-                Upload your financial document and generate audit planning reports.
-                Ask questions about your own uploaded documents only.
-              </div>
+              <div className="portal-card-desc">Upload your financial document and generate audit planning reports. Ask questions about your own uploaded documents only.</div>
             </div>
             <div className="portal-card-arrow">→</div>
           </button>
@@ -560,18 +485,17 @@ function App() {
             <div className="portal-card-icon">🏢</div>
             <div className="portal-card-body">
               <div className="portal-card-title">Manager Portal</div>
-              <div className="portal-card-desc">
-                View all uploaded documents. Select any document and ask the AI
-                assistant questions based on that specific document.
-              </div>
+              <div className="portal-card-desc">View all uploaded documents. Select any document and ask the AI assistant questions based on that specific document.</div>
             </div>
             <div className="portal-card-arrow">→</div>
           </button>
         </div>
+        <ChatPopup />
       </div>
     );
   }
 
+  // ── MAIN APP ──────────────────────────────────────────────────────────
   return (
     <div className={`app-shell ${sidebarOpen ? "sidebar-open" : "sidebar-closed"}`}>
 
@@ -628,15 +552,13 @@ function App() {
         )}
 
         <div style={{ marginTop: "auto" }}>
-          <button className="switch-portal-btn"
-            onClick={() => { setView(VIEW_PORTAL); setPortal(null); }}>
+          <button className="switch-portal-btn" onClick={() => { setView(VIEW_PORTAL); setPortal(null); }}>
             Switch Portal
           </button>
         </div>
       </aside>
 
       <main className="main-content">
-
         <header className="topbar">
           <div className="topbar-left">
             {!sidebarOpen && (
@@ -646,19 +568,15 @@ function App() {
               {view === VIEW_HOME         && "Welcome — What would you like to do?"}
               {view === VIEW_MANAGER_HOME && "Manager Portal — Select a Document"}
               {view === VIEW_UPLOAD       && "Report Analysis"}
-              {view === VIEW_AGENT        && (selectedAgent?.label || "Audit Planning Agent")}
-              {view === VIEW_GENERAL      && "General Q&A — UAE Finance & Law"}
+              {view === VIEW_AGENT        && (selectedAgent?.label || "Agent")}
               {view === VIEW_MANAGER_CHAT && `Document Q&A — ${getReportName(selectedReport)}`}
             </div>
           </div>
-
           {selectedReport && view === VIEW_AGENT && (
             <div className="topbar-report-pill">
               <span className="pill-icon">📑</span>
               <span className="pill-name">{getReportName(selectedReport)}</span>
-              <button className="pill-btn" onClick={handleDownloadAuditPlan}>
-                Download PDF
-              </button>
+              <button className="pill-btn" onClick={handleDownloadAuditPlan}>Download PDF</button>
             </div>
           )}
         </header>
@@ -688,24 +606,10 @@ function App() {
                 <div className="option-icon">📄</div>
                 <div className="option-body">
                   <div className="option-title">Upload a Financial Document</div>
-                  <div className="option-desc">
-                    Upload a financial statement. The AI agents will automatically
-                    generate audit planning, risk assessments, and recommendations.
-                  </div>
+                  <div className="option-desc">Upload a financial statement. The AI agents will automatically generate audit planning, risk assessments, and recommendations.</div>
                 </div>
                 <div className="option-arrow">→</div>
               </label>
-              <button className="home-option-card qa-card" onClick={() => setView(VIEW_GENERAL)}>
-                <div className="option-icon">💬</div>
-                <div className="option-body">
-                  <div className="option-title">Ask a Question</div>
-                  <div className="option-desc">
-                    Ask anything about UAE Corporate Tax, VAT regulations, IFRS standards,
-                    audit procedures, or general financial compliance topics.
-                  </div>
-                </div>
-                <div className="option-arrow">→</div>
-              </button>
             </div>
             {uploading && <div className="home-status">Uploading your document...</div>}
           </div>
@@ -716,10 +620,7 @@ function App() {
             <div className="manager-home-hero">
               <div className="manager-home-icon">🏢</div>
               <h2 className="manager-home-title">Manager Portal</h2>
-              <p className="manager-home-desc">
-                Select a document from the list below to open it and ask questions.
-                The AI will answer based on that specific document only.
-              </p>
+              <p className="manager-home-desc">Select a document from the list below to open it and ask questions.</p>
             </div>
             {loadingReports && <p className="manager-loading">Loading documents...</p>}
             {!loadingReports && reports.length === 0 && (
@@ -773,17 +674,12 @@ function App() {
               <div className="master-badge">MASTER AGENT</div>
               <FinancialIcon />
               <div className="master-title">FMS AI AgentCore</div>
-              <div className="master-desc">
-                Your document has been processed. Select an agent below to view
-                the generated report instantly.
-              </div>
+              <div className="master-desc">Your document has been processed. Select an agent below to view the generated report instantly.</div>
               {selectedReport && (
                 <div className="master-doc-pill">📑 {getReportName(selectedReport)}</div>
               )}
             </div>
-
             <div className="sub-agents-label">Report Analysis</div>
-
             <div className="sub-agents-grid">
               {SUB_AGENTS.map((agent) => (
                 <button key={agent.id}
@@ -797,9 +693,7 @@ function App() {
                   </div>
                   {agent.available ? (
                     <div className="sub-agent-status-pill">
-                      {preGenerating  && <span className="status-pill generating">Preparing...</span>}
-                      {!preGenerating && preGeneratedReport  && <span className="status-pill ready">✅ Ready</span>}
-                      {!preGenerating && !preGeneratedReport && <span className="status-pill pending">→</span>}
+                      <span className="status-pill pending">→</span>
                     </div>
                   ) : (
                     <div className="sub-agent-soon">Coming Soon</div>
@@ -807,7 +701,6 @@ function App() {
                 </button>
               ))}
             </div>
-
             <label className="upload-another-btn">
               <input ref={fileInputRef} type="file"
                 accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg"
@@ -827,6 +720,7 @@ function App() {
             <Chatbot
               reportId={selectedReportId}
               selectedReport={selectedReport}
+              selectedAgent={selectedAgent}
               preGeneratedReport={preGeneratedReport}
               preGenerating={preGenerating}
               onReportGenerated={(content) => setAuditPlanContent(content)}
@@ -834,16 +728,10 @@ function App() {
           </div>
         )}
 
-        {view === VIEW_GENERAL && (
-          <div className="chatbot-view">
-            <div className="chatbot-nav-bar">
-              <button className="back-nav-btn" onClick={() => setView(VIEW_HOME)}>← Back</button>
-            </div>
-            <Chatbot reportId={null} selectedReport={null} generalMode />
-          </div>
-        )}
-
       </main>
+
+      {/* Floating chat popup — visible on all screens */}
+      <ChatPopup />
     </div>
   );
 }
