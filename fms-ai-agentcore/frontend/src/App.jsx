@@ -31,7 +31,7 @@ const SUB_AGENTS = [
     label:       "Financial Statement Review Agent",
     description: "Reviews financial statements for IFRS compliance, missing disclosures, note consistency, classification, ratios, going concern, and related party disclosures.",
     icon:        "📊",
-    available:   true,
+    available:   false,
   },
   {
     id:          "tax_agent",
@@ -83,9 +83,7 @@ function markdownToHtml(markdown = "") {
       let t = `<table><thead><tr>`;
       headerCells.forEach((c) => { t += `<th>${c}</th>`; });
       t += `</tr></thead><tbody>`;
-      bodyRows.forEach((row) => {
-        t += `<tr>`; row.forEach((c) => { t += `<td>${c}</td>`; }); t += `</tr>`;
-      });
+      bodyRows.forEach((row) => { t += `<tr>`; row.forEach((c) => { t += `<td>${c}</td>`; }); t += `</tr>`; });
       t += `</tbody></table>`;
       output.push(t);
       continue;
@@ -193,15 +191,9 @@ function FinancialIcon() {
 // ─── Chat Popup ───────────────────────────────────────────────────────
 function ChatPopup() {
   const [open, setOpen] = useState(false);
-
   return (
     <>
-      {/* Floating button */}
-      <button
-        className="chat-popup-btn"
-        onClick={() => setOpen((o) => !o)}
-        title="Ask a question"
-      >
+      <button className="chat-popup-btn" onClick={() => setOpen((o) => !o)} title="Ask a question">
         {open ? (
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
             <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
@@ -213,8 +205,6 @@ function ChatPopup() {
         )}
         {!open && <span className="chat-popup-label">Ask a Question</span>}
       </button>
-
-      {/* Popup window */}
       {open && (
         <div className="chat-popup-window">
           <div className="chat-popup-header">
@@ -250,8 +240,12 @@ function App() {
   const [selectedAgent,      setSelectedAgent]      = useState(null);
   const [auditPlanContent,   setAuditPlanContent]   = useState("");
   const [processingProgress, setProcessingProgress] = useState(0);
-  const [preGeneratedReport, setPreGeneratedReport] = useState(null);
-  const [preGenerating,      setPreGenerating]      = useState(false);
+
+  // Separate pre-generated reports per agent
+  const [preGeneratedAuditReport,    setPreGeneratedAuditReport]    = useState(null);
+  const [preGeneratedFsReport,       setPreGeneratedFsReport]       = useState(null);
+  const [preGeneratingAudit,         setPreGeneratingAudit]         = useState(false);
+  const [preGeneratingFs,            setPreGeneratingFs]            = useState(false);
 
   const [loadingReports, setLoadingReports] = useState(false);
   const [uploading,      setUploading]      = useState(false);
@@ -274,13 +268,18 @@ function App() {
     }, 4000);
   }
 
-  async function generateAuditPlanInBackground(reportId, agentId = "audit_planning_agent") {
-    setPreGenerating(true);
-    setPreGeneratedReport(null);
+  async function generateInBackground(reportId, agentId) {
+    const isAudit = agentId === "audit_planning_agent";
+    const isFsRev = agentId === "fs_review_agent";
+
+    if (isAudit) setPreGeneratingAudit(true);
+    if (isFsRev) setPreGeneratingFs(true);
+
+    const message = isFsRev
+      ? "Generate financial statement review."
+      : "Generate audit planning.";
+
     try {
-      const message = agentId === "fs_review_agent"
-        ? "Generate financial statement review."
-        : "Generate audit planning.";
       const res = await fetch(CHAT_API, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -292,21 +291,31 @@ function App() {
         }),
       });
       const data = await res.json();
+
       if (data.status === "processing" && data.jobId) {
         for (let attempt = 0; attempt < 60; attempt++) {
           await sleep(2500);
           try {
             const statusRes  = await fetch(CHAT_STATUS_API(data.jobId));
             const statusData = await statusRes.json();
-            if (statusData.status === "complete") { setPreGeneratedReport(statusData); return; }
+            if (statusData.status === "complete") {
+              if (isAudit) setPreGeneratedAuditReport(statusData);
+              if (isFsRev) setPreGeneratedFsReport(statusData);
+              return;
+            }
             if (statusData.status === "failed") throw new Error(statusData.error);
           } catch {}
         }
-      } else { setPreGeneratedReport(data); }
+      } else {
+        if (isAudit) setPreGeneratedAuditReport(data);
+        if (isFsRev) setPreGeneratedFsReport(data);
+      }
     } catch (err) {
       console.error("BG_GENERATE_FAILED:", err.message);
-      setPreGeneratedReport(null);
-    } finally { setPreGenerating(false); }
+    } finally {
+      if (isAudit) setPreGeneratingAudit(false);
+      if (isFsRev) setPreGeneratingFs(false);
+    }
   }
 
   async function fetchReports() {
@@ -354,8 +363,12 @@ function App() {
             setReports(list);
             setSelectedReport(latest);
             setSelectedReportId(latestId);
+            // Reset both pre-generated reports
+            setPreGeneratedAuditReport(null);
+            setPreGeneratedFsReport(null);
             setView(VIEW_UPLOAD);
-            generateAuditPlanInBackground(latestId, "audit_planning_agent");
+            // Only pre-generate audit planning in background
+            generateInBackground(latestId, "audit_planning_agent");
           }, 800);
         }
         if (attempts >= 60) { stopPolling(); setProcessing(false); setProcessingProgress(0); }
@@ -369,9 +382,10 @@ function App() {
     try {
       setUploading(true);
       setError("");
-      setPreGeneratedReport(null);
-      setPreGenerating(false);
+      setPreGeneratedAuditReport(null);
+      setPreGeneratedFsReport(null);
       const prevId = getReportId(selectedReport);
+
       const urlRes    = await fetch(UPLOAD_URL_API, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -380,13 +394,16 @@ function App() {
       const urlData   = await urlRes.json();
       const uploadUrl = urlData.uploadUrl || urlData.upload_url || urlData.url || urlData.presignedUrl;
       if (!uploadUrl) throw new Error("Upload URL not returned");
+
       await fetch(uploadUrl, {
         method: "PUT",
         headers: { "Content-Type": file.type || "application/pdf" },
         body: file,
       });
+
       if (fileInputRef.current)   fileInputRef.current.value   = "";
       if (sidebarFileRef.current) sidebarFileRef.current.value = "";
+
       setUploading(false);
       setProcessing(true);
       setView(VIEW_UPLOAD);
@@ -417,7 +434,6 @@ function App() {
     }
     setSelectedAgent(null);
     setAuditPlanContent("");
-    setPreGeneratedReport(null);
     setError("");
   }
 
@@ -425,10 +441,17 @@ function App() {
     if (!agent.available) return;
     setSelectedAgent(agent);
     setAuditPlanContent("");
-    setPreGeneratedReport(null);
     setView(VIEW_AGENT);
-    if (selectedReportId) {
-      generateAuditPlanInBackground(selectedReportId, agent.id);
+
+    const isAudit = agent.id === "audit_planning_agent";
+    const isFsRev = agent.id === "fs_review_agent";
+
+    // Only generate if not already generated or generating
+    if (isAudit && !preGeneratedAuditReport && !preGeneratingAudit && selectedReportId) {
+      generateInBackground(selectedReportId, "audit_planning_agent");
+    }
+    if (isFsRev && !preGeneratedFsReport && !preGeneratingFs && selectedReportId) {
+      generateInBackground(selectedReportId, "fs_review_agent");
     }
   }
 
@@ -462,7 +485,30 @@ function App() {
 
   useEffect(() => { return () => stopPolling(); }, []);
 
-  // ── PORTAL SELECTION ─────────────────────────────────────────────────
+  // Compute what to show on agent cards
+  const auditStatus = preGeneratingAudit ? "preparing" : preGeneratedAuditReport ? "ready" : "idle";
+  const fsStatus    = preGeneratingFs    ? "preparing" : preGeneratedFsReport    ? "ready" : "idle";
+
+  function getAgentStatus(agentId) {
+    if (agentId === "audit_planning_agent") return auditStatus;
+    if (agentId === "fs_review_agent")      return fsStatus;
+    return "idle";
+  }
+
+  function getPreGeneratedReport() {
+    if (!selectedAgent) return null;
+    if (selectedAgent.id === "audit_planning_agent") return preGeneratedAuditReport;
+    if (selectedAgent.id === "fs_review_agent")      return preGeneratedFsReport;
+    return null;
+  }
+
+  function getPreGenerating() {
+    if (!selectedAgent) return false;
+    if (selectedAgent.id === "audit_planning_agent") return preGeneratingAudit;
+    if (selectedAgent.id === "fs_review_agent")      return preGeneratingFs;
+    return false;
+  }
+
   if (view === VIEW_PORTAL) {
     return (
       <div className="portal-screen">
@@ -495,7 +541,6 @@ function App() {
     );
   }
 
-  // ── MAIN APP ──────────────────────────────────────────────────────────
   return (
     <div className={`app-shell ${sidebarOpen ? "sidebar-open" : "sidebar-closed"}`}>
 
@@ -679,28 +724,36 @@ function App() {
                 <div className="master-doc-pill">📑 {getReportName(selectedReport)}</div>
               )}
             </div>
+
             <div className="sub-agents-label">Report Analysis</div>
+
             <div className="sub-agents-grid">
-              {SUB_AGENTS.map((agent) => (
-                <button key={agent.id}
-                  className={`sub-agent-card ${!agent.available ? "sub-agent-disabled" : ""}`}
-                  onClick={() => openAgent(agent)}
-                  disabled={!agent.available}>
-                  <div className="sub-agent-icon">{agent.icon}</div>
-                  <div className="sub-agent-body">
-                    <div className="sub-agent-name">{agent.label}</div>
-                    <div className="sub-agent-desc">{agent.description}</div>
-                  </div>
-                  {agent.available ? (
-                    <div className="sub-agent-status-pill">
-                      <span className="status-pill pending">→</span>
+              {SUB_AGENTS.map((agent) => {
+                const status = getAgentStatus(agent.id);
+                return (
+                  <button key={agent.id}
+                    className={`sub-agent-card ${!agent.available ? "sub-agent-disabled" : ""}`}
+                    onClick={() => openAgent(agent)}
+                    disabled={!agent.available}>
+                    <div className="sub-agent-icon">{agent.icon}</div>
+                    <div className="sub-agent-body">
+                      <div className="sub-agent-name">{agent.label}</div>
+                      <div className="sub-agent-desc">{agent.description}</div>
                     </div>
-                  ) : (
-                    <div className="sub-agent-soon">Coming Soon</div>
-                  )}
-                </button>
-              ))}
+                    {agent.available ? (
+                      <div className="sub-agent-status-pill">
+                        {status === "preparing" && <span className="status-pill generating">⏳ Preparing…</span>}
+                        {status === "ready"     && <span className="status-pill ready">✅ Ready</span>}
+                        {status === "idle"      && <span className="status-pill pending">→</span>}
+                      </div>
+                    ) : (
+                      <div className="sub-agent-soon">Coming Soon</div>
+                    )}
+                  </button>
+                );
+              })}
             </div>
+
             <label className="upload-another-btn">
               <input ref={fileInputRef} type="file"
                 accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg"
@@ -721,8 +774,8 @@ function App() {
               reportId={selectedReportId}
               selectedReport={selectedReport}
               selectedAgent={selectedAgent}
-              preGeneratedReport={preGeneratedReport}
-              preGenerating={preGenerating}
+              preGeneratedReport={getPreGeneratedReport()}
+              preGenerating={getPreGenerating()}
               onReportGenerated={(content) => setAuditPlanContent(content)}
             />
           </div>
@@ -730,7 +783,6 @@ function App() {
 
       </main>
 
-      {/* Floating chat popup — visible on all screens */}
       <ChatPopup />
     </div>
   );
