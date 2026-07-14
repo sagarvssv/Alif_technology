@@ -82,6 +82,27 @@ def normalize_item(item):
     return normalized
 
 
+def strip_heavy_fields(item):
+    """Remove large text fields from list responses. A Lambda response
+    payload has a hard 6MB ceiling — attaching full extracted text/markdown
+    to every document in the list (instead of just the one being viewed)
+    blew straight past that once more than a couple of documents piled up,
+    causing a 413 on every single request, list included. The frontend's
+    matching/polling logic only ever needs name + status + id from this
+    list endpoint; full content is fetched separately per-document via
+    get_document_by_id() when actually needed."""
+    if not item:
+        return item
+    light = dict(item)
+    for field in [
+        "extractedText", "extracted_text",
+        "documentText", "document_text",
+        "reportMarkdown", "report_markdown", "markdown",
+    ]:
+        light.pop(field, None)
+    return light
+
+
 def read_report_markdown(item):
     if not item:
         return ""
@@ -154,8 +175,6 @@ def handler(event, context):
             or query_parameters.get("reportId")
         )
 
-        portal = query_parameters.get("portal", "user")
-
         if document_id:
             item = get_document_by_id(document_id)
 
@@ -183,23 +202,17 @@ def handler(event, context):
             reverse=True
         )
 
-        if portal == "user":
-            latest_report = normalized_reports[0] if normalized_reports else None
-
-            if latest_report:
-                latest_report["reportMarkdown"] = read_report_markdown(latest_report)
-
-            return response(
-                200,
-                {
-                    "reports": [latest_report] if latest_report else []
-                }
-            )
+        # Return every document (not just the newest one — that was the
+        # original bug), but keep each entry LIGHT: no full extracted
+        # text/markdown attached. That heavy content is only fetched for
+        # ONE document at a time, via the document_id branch above, when
+        # the frontend actually needs to read a specific report's content.
+        light_reports = [strip_heavy_fields(r) for r in normalized_reports]
 
         return response(
             200,
             {
-                "reports": normalized_reports
+                "reports": light_reports
             }
         )
 

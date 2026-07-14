@@ -343,7 +343,7 @@ STRICT RULES:
 - If data is missing write: Not available.
 - Use markdown tables exactly as specified.
 - Use bullet points for lists.
-- Do NOT add extra sections.
+- Follow the template sections exactly, including the final summary section.
 - Do NOT change the risk levels assigned to you.
 - Output must be IDENTICAL every time for the same document.
 """
@@ -420,7 +420,13 @@ ALWAYS use these exact roles in this exact order with these exact hours:
 | Tax Specialist | Review VAT and corporate tax compliance | 15 |
 Total estimated hours: 150
 
-Do not write anything after the Staffing Recommendations section.
+# Overall Audit Planning Summary
+Write 3-4 short sentences in plain English summarising this engagement:
+what the entity does, its scale (use actual revenue/asset figures from the
+document), the overall materiality figure, and the top 1-2 risk areas that
+will get the most audit attention. This section MUST be present and complete.
+
+Do not write anything after the Overall Audit Planning Summary section.
 """
 
 
@@ -431,6 +437,7 @@ SECTION_HEADINGS = [
     "Risk Assessment",
     "Audit Programs",
     "Staffing Recommendations",
+    "Overall Audit Planning Summary",
 ]
 
 
@@ -456,7 +463,7 @@ def generate_complete_audit_planning_output(
                 kb_context=kb_context,
                 citation_details=citation_details,
             ),
-            max_tokens=2500,
+            max_tokens=3000,
             temperature=0,
         )
         answer = (result or "").strip()

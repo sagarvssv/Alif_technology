@@ -1,0 +1,22 @@
+{
+  "agentRuntimeId": "MasterAgent-d6EP0K2By5",
+  "agentRuntimeArtifact": {
+    "codeConfiguration": {
+      "code": {
+        "s3": {
+          "bucket": "fmsaiagentcorestack-fmsaioutputbucketbc83df2a-8oyl5kujbbbp",
+          "prefix": "agentcore/master-agent/master-agent.zip"
+        }
+      },
+      "runtime": "PYTHON_3_12",
+      "entryPoint": ["app.py"]
+    }
+  },
+  "roleArn": "arn:aws:iam::497675597422:role/FmsAgentCoreRuntimeRole",
+  "networkConfiguration": {
+    "networkMode": "PUBLIC"
+  },
+  "protocolConfiguration": {
+    "serverProtocol": "HTTP"
+  }
+}
