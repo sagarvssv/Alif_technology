@@ -15,6 +15,23 @@ OUTPUT_BUCKET = os.environ.get("OUTPUT_BUCKET")
 
 table = dynamodb.Table(TABLE_NAME)
 
+# Fields that can be large (extracted document text, full markdown reports).
+# These are stripped out of LIST responses (GET /documents) to keep the
+# payload small and fast for polling, but are still returned in full when
+# fetching a SINGLE document by id (GET /documents/{id}) via
+# get_document_by_id(), since that's the only place that content is needed.
+HEAVY_FIELDS = [
+    "extractedText",
+    "extracted_text",
+    "documentText",
+    "document_text",
+    "reportMarkdown",
+    "report_markdown",
+    "markdown",
+    "sourceTextPreview",
+    "source_text_preview",
+]
+
 
 def response(status_code, body):
     return {
@@ -80,6 +97,18 @@ def normalize_item(item):
     )
 
     return normalized
+
+
+def strip_heavy_fields(item):
+    """Return a shallow copy of item with large text fields removed.
+    Used for list responses only — full content is still available via
+    the single-document GET endpoint."""
+    if not item:
+        return item
+    trimmed = dict(item)
+    for field in HEAVY_FIELDS:
+        trimmed.pop(field, None)
+    return trimmed
 
 
 def read_report_markdown(item):
@@ -154,6 +183,16 @@ def handler(event, context):
             or query_parameters.get("reportId")
         )
 
+        # NOTE: "portal" is read but intentionally no longer used to decide
+        # how MUCH of the list to return. It used to trigger a special case
+        # that threw away everything except the single newest document,
+        # which meant the frontend's upload-completion polling could NEVER
+        # see a newly finished document once any other document existed —
+        # it would spin forever ("stuck at 95%") no matter how long you
+        # waited, because that one document was never the "latest" one.
+        # All callers now get the FULL sorted list; only the heavy text
+        # fields are stripped out (see strip_heavy_fields) to keep the
+        # response small and fast.
         portal = query_parameters.get("portal", "user")
 
         if document_id:
@@ -183,23 +222,12 @@ def handler(event, context):
             reverse=True
         )
 
-        if portal == "user":
-            latest_report = normalized_reports[0] if normalized_reports else None
-
-            if latest_report:
-                latest_report["reportMarkdown"] = read_report_markdown(latest_report)
-
-            return response(
-                200,
-                {
-                    "reports": [latest_report] if latest_report else []
-                }
-            )
+        lightweight_reports = [strip_heavy_fields(item) for item in normalized_reports]
 
         return response(
             200,
             {
-                "reports": normalized_reports
+                "reports": lightweight_reports
             }
         )
 

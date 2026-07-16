@@ -21,6 +21,30 @@ AUDIT_PLANNING_AGENT_QUALIFIER = os.environ.get(
     "DEFAULT",
 )
 
+# Financial Statement Review Agent — deploy the agentcore/financial_statement_review_agent
+# container as its own Bedrock AgentCore Runtime, then set this ARN (and qualifier,
+# if different from DEFAULT) via Lambda environment variables.
+FS_REVIEW_AGENT_RUNTIME_ARN = os.environ.get(
+    "FS_REVIEW_AGENT_RUNTIME_ARN",
+    "",
+)
+FS_REVIEW_AGENT_QUALIFIER = os.environ.get(
+    "FS_REVIEW_AGENT_QUALIFIER",
+    "DEFAULT",
+)
+
+# Maps the frontend's selectedAgent value to the runtime ARN/qualifier to invoke.
+AGENT_RUNTIME_CONFIG = {
+    "audit_planning_agent": {
+        "arn": AUDIT_PLANNING_AGENT_RUNTIME_ARN,
+        "qualifier": AUDIT_PLANNING_AGENT_QUALIFIER,
+    },
+    "fs_review_agent": {
+        "arn": FS_REVIEW_AGENT_RUNTIME_ARN,
+        "qualifier": FS_REVIEW_AGENT_QUALIFIER,
+    },
+}
+
 JOB_TTL_SECONDS = int(os.environ.get("JOB_TTL_SECONDS", str(60 * 60 * 24)))  # 24h
 
 MAX_ATTEMPTS = 3
@@ -45,10 +69,11 @@ def lambda_handler(event, context):
         try:
             print(f"WORKER_ATTEMPT_{attempt}_FOR_JOB:", job_id)
 
-            answer, citations, sources = invoke_agentcore_audit_planning(
+            answer, citations, sources = invoke_agentcore_agent(
                 user_message=event.get("user_message", ""),
                 selected_report_context=event.get("selected_report_context", ""),
                 report_id=event.get("report_id"),
+                report_ids=event.get("report_ids"),
                 selected_agent=event.get("selected_agent", "audit_planning_agent"),
                 general_mode=event.get("general_mode", False),
             )
@@ -86,39 +111,59 @@ def lambda_handler(event, context):
             return
 
 
-def invoke_agentcore_audit_planning(
+def invoke_agentcore_agent(
     user_message,
     selected_report_context="",
     report_id=None,
+    report_ids=None,
     selected_agent=None,
     general_mode=False,
 ):
+    agent_key = selected_agent or "audit_planning_agent"
+    runtime_config = AGENT_RUNTIME_CONFIG.get(agent_key) or AGENT_RUNTIME_CONFIG["audit_planning_agent"]
+    runtime_arn = runtime_config["arn"]
+    runtime_qualifier = runtime_config["qualifier"]
+
+    if not runtime_arn:
+        raise RuntimeError(
+            f"No AgentCore Runtime ARN configured for agent '{agent_key}'. "
+            "Set the corresponding *_RUNTIME_ARN environment variable on this Lambda."
+        )
+
+    # Support both a single report_id (backward compatible) and a
+    # report_ids list (multi-document upload/analysis).
+    resolved_report_ids = report_ids if isinstance(report_ids, list) and report_ids else (
+        [report_id] if report_id else []
+    )
+
     payload = {
         "message":       user_message,
         "question":      user_message,
-        "selectedAgent": selected_agent or "audit_planning_agent",
-        "agent":         selected_agent or "audit_planning_agent",
+        "selectedAgent": agent_key,
+        "agent":         agent_key,
         "generalMode":   general_mode or False,
         "general_mode":  general_mode or False,
-        "reportId":      report_id,
-        "report_id":     report_id,
+        "reportId":      resolved_report_ids[0] if resolved_report_ids else None,
+        "report_id":     resolved_report_ids[0] if resolved_report_ids else None,
+        "reportIds":     resolved_report_ids,
+        "report_ids":    resolved_report_ids,
         "directContext":  selected_report_context or "",
         "direct_context": selected_report_context or "",
         "documentText":   selected_report_context or "",
         "document_text":  selected_report_context or "",
     }
 
-    print("WORKER_INVOKING_AGENTCORE_AUDIT_PLANNING")
-    print("AGENTCORE_RUNTIME_ARN:", AUDIT_PLANNING_AGENT_RUNTIME_ARN)
-    print("AGENTCORE_QUALIFIER:", AUDIT_PLANNING_AGENT_QUALIFIER)
-    print("REPORT_ID:", report_id)
+    print("WORKER_INVOKING_AGENTCORE_AGENT:", agent_key)
+    print("AGENTCORE_RUNTIME_ARN:", runtime_arn)
+    print("AGENTCORE_QUALIFIER:", runtime_qualifier)
+    print("REPORT_IDS:", resolved_report_ids)
     print("SELECTED_AGENT:", selected_agent)
     print("GENERAL_MODE:", general_mode)
     print("CONTEXT_LENGTH:", len(selected_report_context or ""))
 
     response = agentcore_runtime.invoke_agent_runtime(
-        agentRuntimeArn=AUDIT_PLANNING_AGENT_RUNTIME_ARN,
-        qualifier=AUDIT_PLANNING_AGENT_QUALIFIER,
+        agentRuntimeArn=runtime_arn,
+        qualifier=runtime_qualifier,
         payload=json.dumps(payload).encode("utf-8"),
     )
 

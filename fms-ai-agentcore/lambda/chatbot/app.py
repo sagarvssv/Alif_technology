@@ -63,11 +63,19 @@ def lambda_handler(event, context):
         session_id = body.get("sessionId") or body.get("session_id") or str(uuid.uuid4())
         user_id = body.get("userId") or body.get("user_id") or "default-user"
         report_id = body.get("reportId") or body.get("report_id")
+        report_ids = body.get("reportIds") or body.get("report_ids")
+        if not (isinstance(report_ids, list) and report_ids):
+            report_ids = [report_id] if report_id else []
+        selected_agent = (
+            body.get("selectedAgent") or body.get("agent") or "audit_planning_agent"
+        )
+        general_mode = bool(body.get("generalMode") or body.get("general_mode") or False)
 
-        selected_report_context = get_selected_report_context(body, report_id)
+        selected_report_context = get_selected_report_context(body, report_ids)
 
         print("CHAT_USER_MESSAGE:", user_message)
-        print("CHAT_REPORT_ID:", report_id)
+        print("CHAT_REPORT_IDS:", report_ids)
+        print("CHAT_SELECTED_AGENT:", selected_agent)
         print("CHAT_CONTEXT_LENGTH:", len(selected_report_context or ""))
 
         # Save the user's message immediately — no need to wait for the
@@ -78,13 +86,14 @@ def lambda_handler(event, context):
             role="user",
             content=user_message,
             report_id=report_id,
-            metadata={"selectedAgent": "audit_planning_agent"},
+            metadata={"selectedAgent": selected_agent},
         )
 
         job_id = create_job(
             session_id=session_id,
             user_id=user_id,
             report_id=report_id,
+            selected_agent=selected_agent,
         )
 
         invoke_worker_async(
@@ -92,8 +101,11 @@ def lambda_handler(event, context):
             user_message=user_message,
             selected_report_context=selected_report_context,
             report_id=report_id,
+            report_ids=report_ids,
             session_id=session_id,
             user_id=user_id,
+            selected_agent=selected_agent,
+            general_mode=general_mode,
         )
 
         # Respond immediately. The frontend polls /chat/status/{jobId}
@@ -105,7 +117,7 @@ def lambda_handler(event, context):
                 "status": "processing",
                 "jobId": job_id,
                 "sessionId": session_id,
-                "selectedAgent": "audit_planning_agent",
+                "selectedAgent": selected_agent,
             },
         )
 
@@ -129,6 +141,7 @@ def handle_job_status(job_id):
             return api_response(404, {"status": "not_found", "jobId": job_id})
 
         status = job.get("status", "processing")
+        job_selected_agent = job.get("selected_agent") or "audit_planning_agent"
 
         if status == "complete":
             answer = job.get("answer", "")
@@ -148,7 +161,7 @@ def handle_job_status(job_id):
                     role="assistant",
                     content=answer,
                     report_id=report_id,
-                    metadata={"selectedAgent": "audit_planning_agent"},
+                    metadata={"selectedAgent": job_selected_agent},
                 )
                 mark_job_saved_to_history(job_id)
 
@@ -158,7 +171,7 @@ def handle_job_status(job_id):
                     "status": "complete",
                     "jobId": job_id,
                     "answer": answer,
-                    "selectedAgent": "audit_planning_agent",
+                    "selectedAgent": job_selected_agent,
                     "agentOutputs": {},
                     "citations": citations,
                     "sources": sources,
@@ -216,7 +229,7 @@ def json_decimal_default(obj):
     raise TypeError
 
 
-def create_job(session_id, user_id, report_id):
+def create_job(session_id, user_id, report_id, selected_agent="audit_planning_agent"):
     job_id = str(uuid.uuid4())
 
     if not JOBS_TABLE:
@@ -235,6 +248,7 @@ def create_job(session_id, user_id, report_id):
             "session_id": session_id,
             "user_id": user_id,
             "report_id": report_id or "",
+            "selected_agent": selected_agent or "audit_planning_agent",
             "createdAt": datetime.now(timezone.utc).isoformat(),
             "createdAtMs": now_ms,
             "ttl": ttl_epoch,
@@ -275,6 +289,9 @@ def invoke_worker_async(
     report_id,
     session_id,
     user_id,
+    report_ids=None,
+    selected_agent="audit_planning_agent",
+    general_mode=False,
 ):
     if not AUDIT_PLANNING_WORKER_FUNCTION_NAME:
         raise RuntimeError(
@@ -287,11 +304,14 @@ def invoke_worker_async(
         "user_message": user_message,
         "selected_report_context": selected_report_context or "",
         "report_id": report_id,
+        "report_ids": report_ids or ([report_id] if report_id else []),
         "session_id": session_id,
         "user_id": user_id,
+        "selected_agent": selected_agent or "audit_planning_agent",
+        "general_mode": general_mode or False,
     }
 
-    print("DISPATCHING_WORKER_JOB:", job_id)
+    print("DISPATCHING_WORKER_JOB:", job_id, "AGENT:", selected_agent)
 
     lambda_client.invoke(
         FunctionName=AUDIT_PLANNING_WORKER_FUNCTION_NAME,
@@ -300,7 +320,7 @@ def invoke_worker_async(
     )
 
 
-def get_selected_report_context(body, report_id):
+def get_selected_report_context(body, report_ids):
     direct_context = (
         body.get("selectedReportContext")
         or body.get("selected_report_context")
@@ -315,10 +335,27 @@ def get_selected_report_context(body, report_id):
     if direct_context:
         return str(direct_context)[:MAX_REPORT_CONTEXT_CHARS]
 
-    if not report_id:
+    report_ids = [r for r in (report_ids or []) if r]
+    if not report_ids:
         return ""
 
-    return get_report_context_from_dynamodb(report_id)[:MAX_REPORT_CONTEXT_CHARS]
+    if len(report_ids) == 1:
+        return get_report_context_from_dynamodb(report_ids[0])[:MAX_REPORT_CONTEXT_CHARS]
+
+    return get_combined_report_context_from_dynamodb(report_ids)[:MAX_REPORT_CONTEXT_CHARS]
+
+
+def get_combined_report_context_from_dynamodb(report_ids):
+    """Multi-document version — fetches each report's context and
+    concatenates them with clear per-document headers so the agent can
+    tell which financial data came from which uploaded file."""
+    sections = []
+    for index, report_id in enumerate(report_ids, start=1):
+        context = get_report_context_from_dynamodb(report_id)
+        if not context:
+            continue
+        sections.append(f"=== Document {index} of {len(report_ids)} (report_id: {report_id}) ===\n{context}")
+    return "\n\n".join(sections)
 
 
 def get_report_context_from_dynamodb(report_id):

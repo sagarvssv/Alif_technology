@@ -113,6 +113,24 @@ def get_report_id_from_payload(payload):
     )
 
 
+def get_report_ids_from_payload(payload):
+    """
+    Returns a list of report IDs for multi-document analysis.
+    Accepts either a plural reportIds/report_ids array, or falls back to
+    the single reportId/report_id field wrapped in a list, for backward
+    compatibility with callers that only ever sent one document.
+    """
+    if not isinstance(payload, dict):
+        return []
+
+    plural = payload.get("reportIds") or payload.get("report_ids")
+    if isinstance(plural, list) and plural:
+        return [str(r) for r in plural if r]
+
+    single = get_report_id_from_payload(payload)
+    return [single] if single else []
+
+
 def get_direct_context_from_payload(payload):
     if not isinstance(payload, dict):
         return ""

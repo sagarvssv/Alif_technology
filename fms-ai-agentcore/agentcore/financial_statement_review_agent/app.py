@@ -3,8 +3,36 @@ import os
 import traceback
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-AGENT_NAME = "financial_statement_review_agent"
+AGENT_NAME = "fs_review_agent"
 PORT = int(os.environ.get("PORT", "8080"))
+
+GENERATE_TRIGGERS = [
+    "review financial statement",
+    "review the financial statement",
+    "generate financial statement review",
+    "generate fs review",
+    "run financial statement review",
+    "start financial statement review",
+    "financial statement review.",
+    "financial statement review report",
+]
+
+IMPROVE_TRIGGERS = [
+    "improve",
+    "how to reduce",
+    "how to fix",
+    "how to address",
+    "how to resolve",
+    "resolve the issue",
+    "fix the issue",
+    "address the issue",
+    "what can i do about",
+    "what should i do about",
+    "recommendations for",
+    "steps to fix",
+    "steps to resolve",
+    "remediate",
+]
 
 
 def safe_json_dumps(data):
@@ -32,28 +60,64 @@ def prepare_imports():
         sys.path.append(agentcore_dir)
 
 
+def is_generate_request(message: str) -> bool:
+    msg = message.lower().strip()
+    for trigger in GENERATE_TRIGGERS:
+        if trigger in msg:
+            return True
+    return False
+
+
+def is_improve_request(message: str) -> bool:
+    msg = message.lower().strip()
+    for trigger in IMPROVE_TRIGGERS:
+        if trigger in msg:
+            return True
+    return False
+
+
+def extract_issue_area(message: str) -> str:
+    """Extract which finding area the user is asking about."""
+    msg = message.lower()
+    areas = [
+        "ifrs compliance", "disclosure", "note consistency", "classification",
+        "ratio", "trend", "going concern", "related party",
+    ]
+    for area in areas:
+        if area in msg:
+            return area
+    return ""
+
+
 def run_agent(payload):
     prepare_imports()
 
     from shared.bedrock import invoke_claude
     from shared.kb import retrieve_from_kb, format_citations
-    from shared.report_context import get_report_context, build_context_summary
+    from shared.report_context import get_combined_report_context, build_context_summary
     from shared.utils import (
         build_response,
         compact_text,
         get_direct_context_from_payload,
         get_message_from_payload,
-        get_report_id_from_payload,
+        get_report_ids_from_payload,
     )
 
     original_user_message = get_message_from_payload(payload)
-    report_id             = get_report_id_from_payload(payload)
+    report_ids             = get_report_ids_from_payload(payload)
     direct_context        = get_direct_context_from_payload(payload)
 
-    user_message = original_user_message or "Generate financial statement review."
+    general_mode = (
+        payload.get("generalMode", False)
+        or payload.get("general_mode", False)
+        or payload.get("selectedAgent") == "general_kb_agent"
+        or payload.get("agent") == "general_kb_agent"
+    )
 
-    # ── No document — answer general question ────────────────────────────
-    if not report_id:
+    user_message = original_user_message or "Review financial statement."
+
+    # ── GENERAL Q&A MODE ─────────────────────────────────────────────────
+    if general_mode or not report_ids:
         kb_context, citations = retrieve_from_kb(user_message, number_of_results=6)
         answer = answer_general_question(
             invoke_claude=invoke_claude,
@@ -64,42 +128,46 @@ def run_agent(payload):
             answer=answer,
             selected_agent=AGENT_NAME,
             citations=citations,
-            extra={"agentType": "fs_review", "agentName": "Financial Statement Review Agent"},
+            extra={"agentType": "general", "agentName": "General Q&A Agent"},
         )
 
-    # ── Load document context ─────────────────────────────────────────────
-    report_context  = get_report_context(report_id=report_id, direct_context=direct_context)
-    context_summary = build_context_summary(compact_text(report_context, max_chars=18000))
+    # ── Load document context (one or many uploaded files, combined) ──────
+    report_context  = get_combined_report_context(report_ids=report_ids, direct_context=direct_context)
+    max_context_chars = 18000 * min(len(report_ids), 3)
+    context_summary = build_context_summary(compact_text(report_context, max_chars=max_context_chars))
 
-    # ── Detect if follow-up question or full review ───────────────────────
-    generate_triggers = [
-        "generate financial statement review",
-        "generate fs review",
-        "generate review",
-        "financial statement review.",
-        "review financial statement",
-        "start review",
-        "run review",
-        "produce review",
-    ]
-
-    msg_lower = user_message.lower().strip()
-    is_generate = any(t in msg_lower for t in generate_triggers)
-
-    if is_generate:
-        kb_query = "IFRS financial statement review compliance disclosures ratios going concern related party"
-        kb_context, citations = retrieve_from_kb(kb_query, number_of_results=8)
+    # ── ROUTE ─────────────────────────────────────────────────────────────
+    if is_generate_request(user_message):
+        kb_query = build_kb_query(user_message, report_context, compact_text)
+        kb_context, citations = retrieve_from_kb(kb_query, number_of_results=6)
         citation_details = format_citations(citations)
 
-        answer = generate_fs_review_output(
+        answer = generate_complete_fs_review_output(
             invoke_claude=invoke_claude,
+            user_message=user_message,
+            report_context=context_summary,
+            kb_context=kb_context,
+            citation_details=citation_details,
+        )
+
+    elif is_improve_request(user_message):
+        issue_area = extract_issue_area(user_message)
+        kb_context, citations = retrieve_from_kb(
+            f"how to resolve {issue_area} IFRS financial statement issue", number_of_results=6
+        )
+
+        answer = generate_issue_resolution_plan(
+            invoke_claude=invoke_claude,
+            user_message=user_message,
+            issue_area=issue_area,
             report_context=context_summary,
             kb_context=kb_context,
         )
+
     else:
-        # Follow-up question about the review
         kb_context, citations = retrieve_from_kb(user_message, number_of_results=5)
-        answer = answer_followup_question(
+
+        answer = answer_document_question(
             invoke_claude=invoke_claude,
             user_message=user_message,
             report_context=context_summary,
@@ -110,146 +178,32 @@ def run_agent(payload):
         answer=answer,
         selected_agent=AGENT_NAME,
         citations=citations,
-        extra={"agentType": "fs_review", "agentName": "Financial Statement Review Agent"},
+        extra={"agentType": "sub_agent", "agentName": "Financial Statement Review Agent"},
     )
 
 
-def generate_fs_review_output(invoke_claude, report_context, kb_context):
-    system_prompt = """
-You are a senior IFRS financial statement reviewer and audit partner with 20+ years experience.
-Your job is to review draft financial statements and identify issues across 7 areas.
-
-STRICT OUTPUT RULES:
-- Output ONLY the structured review report below — nothing else before or after.
-- Use the EXACT section headings provided.
-- Every row in every table must have ALL 4 columns populated.
-- Risk Rating must be exactly one of: High | Medium | Low
-- Use actual numbers, AED amounts, and line items from the document.
-- Be specific — reference exact balances, note numbers, and IFRS standards.
-- Do NOT generate an audit planning report.
-- Do NOT include Engagement Strategy, Materiality, Staffing, or Audit Programs.
-- temperature=0 means identical output every time for the same document.
-"""
-
-    user_prompt = f"""
-Financial statement data from uploaded document:
-{report_context or "No document data available."}
-
-IFRS Knowledge Base context:
-{kb_context or "No knowledge base results."}
-
-Generate the complete Financial Statement Review Report below.
-Use actual figures from the document throughout. Be specific and professional.
-
-# Financial Statement Review Report
-
----
-
-## 1. IFRS Compliance Review
-Review whether the financial statements comply with applicable IFRS standards.
-
-| Issue | Standard Reference | Risk Rating | Recommendation |
-|-------|-------------------|-------------|----------------|
-[Generate minimum 4 rows using actual document data. Reference specific IFRS standards e.g. IFRS 15, IAS 36, IFRS 9, IAS 1, IFRS 16.]
-
----
-
-## 2. Missing Disclosures
-Identify required disclosures that are absent or incomplete in the notes.
-
-| Issue | Standard Reference | Risk Rating | Recommendation |
-|-------|-------------------|-------------|----------------|
-[Generate minimum 4 rows. Reference specific disclosure requirements from IFRS standards.]
-
----
-
-## 3. Note Consistency Checks
-Check whether notes to financial statements are consistent with the face of the statements.
-
-| Issue | Standard Reference | Risk Rating | Recommendation |
-|-------|-------------------|-------------|----------------|
-[Generate minimum 3 rows. Reference specific note numbers and balances from the document.]
-
----
-
-## 4. Classification Review
-Review whether items are correctly classified in the financial statements.
-
-| Issue | Standard Reference | Risk Rating | Recommendation |
-|-------|-------------------|-------------|----------------|
-[Generate minimum 3 rows. Reference specific line items and IAS 1 classification rules.]
-
----
-
-## 5. Ratio and Trend Analysis
-Calculate key financial ratios using actual figures from the document.
-
-| Ratio | Value | Benchmark | Assessment |
-|-------|-------|-----------|------------|
-[Generate these exact ratios using document figures:
-- Current Ratio (Current Assets / Current Liabilities)
-- Gross Margin % (Gross Profit / Revenue x 100)
-- Net Margin % (Profit for year / Revenue x 100)
-- Debt-to-Equity (Total Liabilities / Total Equity)
-- Return on Assets % (Profit for year / Total Assets x 100)
-- Receivables Days (Trade Receivables / Revenue x 365)
-Show actual calculated values.]
-
----
-
-## 6. Going Concern Indicators
-Assess going concern risks based on the financial data.
-
-| Indicator | Observation | Risk Rating | Recommendation |
-|-----------|-------------|-------------|----------------|
-[Generate minimum 4 rows covering both positive and negative indicators. Use actual figures.]
-
----
-
-## 7. Related Party Disclosure Review
-Review completeness and adequacy of related party disclosures under IAS 24.
-
-| Issue | Standard Reference | Risk Rating | Recommendation |
-|-------|-------------------|-------------|----------------|
-[Generate minimum 3 rows. Reference actual related party balances from the document.]
-
----
-
-## Overall Review Summary
-[Write 4-6 sentences summarising: (1) overall quality of the financial statements, (2) the 2-3 most critical issues found, (3) priority actions management must take before finalising the statements. Use specific AED amounts and IFRS references.]
-"""
-
-    try:
-        result = invoke_claude(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            max_tokens=3500,
-            temperature=0,
-        )
-        answer = (result or "").strip()
-    except Exception as exc:
-        return f"# Financial Statement Review Report\n\n_Could not be generated: {str(exc)}_"
-
-    if not answer.lstrip().startswith("# Financial Statement Review"):
-        answer = "# Financial Statement Review Report\n\n---\n\n" + answer.lstrip()
-
-    return answer
-
-
+# ── General KB question (no document) ────────────────────────────────
 def answer_general_question(invoke_claude, user_message, kb_context):
     system_prompt = """
-You are an IFRS financial statement review expert.
-Answer the user's question clearly using the Knowledge Base context provided.
-Maximum 400 words. Use bullet points where helpful.
-Do NOT generate a full financial statement review report.
+You are a UAE financial reporting and IFRS compliance expert assistant.
+Answer the user's question clearly and directly using the Knowledge Base context provided.
+
+STRICT RULES:
+- Answer ONLY the specific question asked.
+- Do NOT generate a financial statement review report.
+- Use plain, professional English.
+- Maximum 400 words.
+- Use bullet points where helpful.
+- If not in the knowledge base say: "This detail is not in the available knowledge base. Please consult a qualified professional."
 """
     user_prompt = f"""
-Knowledge Base:
+Knowledge Base context:
 {kb_context or "No knowledge base results found."}
 
-User question: {user_message}
+User question:
+{user_message}
 
-Answer directly and concisely.
+Answer the question directly and concisely.
 """
     try:
         result = invoke_claude(
@@ -260,42 +214,235 @@ Answer directly and concisely.
         )
         return (result or "").strip()
     except Exception as exc:
-        return f"Unable to retrieve an answer. Error: {str(exc)}"
+        return f"Unable to retrieve an answer at this time. Error: {str(exc)}"
 
 
-def answer_followup_question(invoke_claude, user_message, report_context, kb_context):
+# ── Follow-up question about uploaded document ───────────────────────
+def answer_document_question(invoke_claude, user_message, report_context, kb_context):
     system_prompt = """
-You are an IFRS financial statement review expert.
-The user has already received a full financial statement review report.
-They are asking a specific follow-up question about it.
+You are an expert IFRS financial statement reviewer.
+The user has an uploaded draft financial statement and has already seen the full
+review report. They are now asking a specific follow-up question about it.
 
 STRICT RULES:
 - Answer ONLY the specific question asked.
 - Do NOT regenerate the full review report.
-- Use actual AED numbers and IFRS references from the document.
+- Use the financial data from the document context to give accurate, specific answers.
+- Use actual AED numbers from the document where relevant.
+- Cite the relevant IFRS/IAS standard where applicable.
 - Maximum 500 words. Use bullet points where helpful.
 """
     user_prompt = f"""
 Document financial data:
 {report_context or "No document context available."}
 
-Knowledge Base:
-{kb_context or "No knowledge base results."}
+Knowledge Base guidance:
+{kb_context or "No knowledge base results found."}
 
-User question: {user_message}
+User question:
+{user_message}
 
-Answer this specific question using the document data above.
+Answer the question directly and concisely.
 """
     try:
         result = invoke_claude(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            max_tokens=1000,
+            max_tokens=900,
             temperature=0,
         )
         return (result or "").strip()
     except Exception as exc:
-        return f"Unable to answer this question. Error: {str(exc)}"
+        return f"Unable to retrieve an answer at this time. Error: {str(exc)}"
+
+
+# ── Resolution plan for a specific flagged issue ─────────────────────
+def generate_issue_resolution_plan(invoke_claude, user_message, issue_area, report_context, kb_context):
+    system_prompt = """
+You are a senior IFRS technical accounting specialist.
+The user wants a detailed, actionable resolution plan for a specific issue
+identified in their financial statement review report.
+
+FORMAT RULES:
+- Give a structured, professional resolution plan.
+- Use clear headings and numbered steps.
+- Include the specific IFRS/IAS standard reference.
+- Include what management should change in the financial statements.
+- Include what the reviewer will re-check after the fix.
+- Use actual numbers from the document where available.
+- Maximum 600 words.
+- Do NOT regenerate the full review report.
+- Focus ONLY on the specific issue area asked about.
+"""
+    area_label = issue_area.title() if issue_area else "the identified issue"
+    user_prompt = f"""
+Document financial data:
+{report_context or "No document context available."}
+
+Knowledge Base guidance:
+{kb_context or "No knowledge base results found."}
+
+User request:
+{user_message}
+
+The user wants to resolve the **{area_label}** issue.
+
+Generate a resolution plan with this structure:
+
+## 🎯 Issue: {area_label}
+
+### Standard Reference
+State the exact IFRS/IAS standard that applies.
+
+### What Needs to Change
+Numbered list of specific changes to the financial statements or disclosures.
+
+### ✅ How the Reviewer Will Verify the Fix
+Numbered list of what will be checked to confirm the issue is resolved.
+
+Be specific, practical, and use plain English.
+"""
+    try:
+        result = invoke_claude(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            max_tokens=1200,
+            temperature=0,
+        )
+        return (result or "").strip()
+    except Exception as exc:
+        return f"Unable to generate resolution plan. Error: {str(exc)}"
+
+
+def build_kb_query(user_message, report_context, compact_text):
+    query = user_message
+    if report_context:
+        query += "\n\nUploaded document context summary:\n"
+        query += compact_text(report_context, max_chars=3000)
+    query += "\n\nFind IFRS/IAS guidance: disclosures, presentation, classification, going concern, related parties."
+    return query
+
+
+def base_system_prompt():
+    return """
+You are a senior IFRS financial statement reviewer. Write for a business owner or
+manager who is NOT an accountant. Follow these strict rules:
+
+LANGUAGE RULES:
+- Use simple, short sentences. Maximum 15 words per sentence.
+- No jargon without a plain explanation.
+- No long paragraphs. Use short bullet points only.
+- Use actual numbers from the document (e.g. AED 3,100,000).
+- If data is missing, write: Not available.
+
+FORMAT RULES:
+- Use markdown tables where requested.
+- Keep tables to maximum 8 rows.
+- Do NOT write long explanations.
+- Do NOT repeat information.
+"""
+
+
+def combined_prompt(user_message, report_context, kb_context, citation_details):
+    return f"""
+Financial statement context:
+{report_context}
+
+Knowledge Base:
+{kb_context or "None."}
+
+Generate a SHORT, SIMPLE financial statement review report. Write for a non-accountant.
+Use plain English. Short bullets only. No long paragraphs.
+
+Review the draft financial statements across these seven functions:
+1. IFRS compliance review
+2. Missing disclosures
+3. Note consistency checks
+4. Classification review
+5. Ratio and trend analysis
+6. Going concern indicators
+7. Related party disclosure review
+
+Each section must start with the exact heading shown. Separate sections with: ---
+
+# Review Summary
+A simple table:
+| Item | Detail |
+Show: Client name, Period reviewed, Overall opinion (one short sentence), Number of issues found.
+Maximum 5 rows.
+
+# Ratio and Trend Analysis
+Show this table exactly:
+| Ratio | Current Period | Prior Period | Trend | Observation |
+Use actual numbers from the document. Cover liquidity, profitability, and leverage ratios.
+Maximum 6 rows.
+
+# Findings
+Show this table exactly:
+| Issue | Standard Reference | Risk Rating | Recommendation |
+Cover findings from ALL seven review functions above (IFRS compliance, missing
+disclosures, note consistency, classification, ratio/trend concerns, going
+concern indicators, related party disclosures).
+Risk Rating must be exactly one of: High, Medium-High, Medium, Low-Medium, Low.
+Standard Reference must cite the specific IFRS/IAS standard (e.g. "IAS 1.54",
+"IFRS 7.31", "IAS 24.18").
+Recommendation must be one short, specific, actionable sentence.
+Maximum 10 rows. Order by Risk Rating, highest first.
+
+# Going Concern Assessment
+3-5 short bullets on whether going concern indicators were identified, and why.
+
+Do not write anything after the last section.
+"""
+
+
+SECTION_HEADINGS = [
+    "Review Summary",
+    "Ratio and Trend Analysis",
+    "Findings",
+    "Going Concern Assessment",
+]
+
+
+def ensure_all_sections_present(answer):
+    missing = [h for h in SECTION_HEADINGS if f"# {h}" not in answer]
+    if not missing:
+        return answer
+    placeholders = "\n\n---\n\n".join(
+        f"# {h}\n\n_Could not be generated._" for h in missing
+    )
+    return f"{answer.strip()}\n\n---\n\n{placeholders}"
+
+
+def generate_complete_fs_review_output(
+    invoke_claude, user_message, report_context, kb_context, citation_details,
+):
+    try:
+        result = invoke_claude(
+            system_prompt=base_system_prompt(),
+            user_prompt=combined_prompt(
+                user_message=user_message,
+                report_context=report_context,
+                kb_context=kb_context,
+                citation_details=citation_details,
+            ),
+            max_tokens=2500,
+            temperature=0,
+        )
+        answer = (result or "").strip()
+    except Exception as exc:
+        answer = (
+            "# Financial Statement Review\n\n"
+            f"_Could not be generated: {str(exc)}_"
+        )
+        return answer
+
+    answer = ensure_all_sections_present(answer)
+
+    if not answer.lstrip().startswith("# Financial Statement Review"):
+        answer = "# Financial Statement Review\n\n---\n\n" + answer.lstrip()
+
+    return answer
 
 
 class AgentCoreHTTPHandler(BaseHTTPRequestHandler):
