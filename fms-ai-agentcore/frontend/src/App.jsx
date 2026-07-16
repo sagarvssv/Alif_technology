@@ -42,13 +42,6 @@ const SUB_AGENTS = [
     icon:        "📊",
     available:   true,
   },
-  {
-    id:          "tax_agent",
-    label:       "UAE Tax & VAT Agent",
-    description: "Answers questions on UAE Corporate Tax Law, VAT compliance, and transfer pricing regulations.",
-    icon:        "🧾",
-    available:   false,
-  },
 ];
 
 const AGENT_GENERATE_MESSAGES = {
@@ -367,6 +360,12 @@ function App() {
   const sidebarFileRef = useRef(null);
   const pollingRef     = useRef(null);
   const progressRef    = useRef(null);
+  // Tracks selectedReportId in a ref (in addition to state) so background
+  // async work (report generation that may finish long after the user has
+  // clicked to a DIFFERENT document) can check "is my result still for the
+  // document currently on screen?" without capturing a stale value from
+  // the render it was created in.
+  const selectedReportIdRef = useRef("");
 
   const [view,               setView]               = useState(VIEW_PORTAL);
   const [portal,             setPortal]             = useState(null);
@@ -376,6 +375,13 @@ function App() {
   const [selectedAgent,      setSelectedAgent]      = useState(null);
   const [processingProgress, setProcessingProgress] = useState(0);
   const [agentReports,       setAgentReports]        = useState(emptyAgentReportState());
+  // Per-document cache: { [reportId]: emptyAgentReportState()-shaped object }.
+  // This is what lets uploading abc.pdf + xyz.pdf (or more) produce
+  // genuinely separate Master Agent / Audit Planning / FS Review results
+  // instead of one shared slot that the last-generated document overwrites.
+  const [agentReportsByDoc,  setAgentReportsByDoc]  = useState({});
+  // Which uploaded files currently have their sidebar dropdown expanded.
+  const [expandedFileIds,    setExpandedFileIds]    = useState(() => new Set());
   const [qaPopupOpen,        setQaPopupOpen]        = useState(false);
   const [selectedProjectItem, setSelectedProjectItem] = useState(null);
   const [activeProjectAgent, setActiveProjectAgent]   = useState(null);
@@ -386,11 +392,43 @@ function App() {
   const [error,          setError]          = useState("");
   const [sidebarOpen,    setSidebarOpen]    = useState(true);
 
+  useEffect(() => { selectedReportIdRef.current = selectedReportId; }, [selectedReportId]);
+
+  // Patches a single agent's live state (used by openAgent / the Chatbot's
+  // onReportGenerated follow-up-chat callback). Also mirrors the patch
+  // into the per-document cache for whichever document is currently
+  // selected, so a follow-up question answered inside the Audit Planning
+  // chat doesn't silently fall out of sync with what the sidebar dropdown
+  // would restore later.
   function updateAgentReport(agentId, patch) {
-    setAgentReports((prev) => ({
-      ...prev,
-      [agentId]: { ...(prev[agentId] || { content: "", preGenerated: null, preGenerating: false, reportId: null }), ...patch },
-    }));
+    setAgentReports((prev) => {
+      const updated = {
+        ...prev,
+        [agentId]: { ...(prev[agentId] || { content: "", preGenerated: null, preGenerating: false, reportId: null }), ...patch },
+      };
+      const docId = selectedReportIdRef.current;
+      if (docId) {
+        setAgentReportsByDoc((prevByDoc) => ({ ...prevByDoc, [docId]: updated }));
+      }
+      return updated;
+    });
+  }
+
+  // Writes a patch for a specific (docId, agentId) into the per-document
+  // cache, and — only if that document is the one currently on screen —
+  // also mirrors the same patch into the live `agentReports` state that
+  // the sidebar / Master Agent view / Chatbot actually render from.
+  function updateDocAgentReport(docId, agentId, patch) {
+    setAgentReportsByDoc((prev) => {
+      const existingDoc   = prev[docId] || emptyAgentReportState();
+      const existingAgent = existingDoc[agentId] || { content: "", preGenerated: null, preGenerating: false, reportId: docId };
+      const updatedDoc    = { ...existingDoc, [agentId]: { ...existingAgent, ...patch, reportId: docId } };
+      const updatedByDoc  = { ...prev, [docId]: updatedDoc };
+      if (selectedReportIdRef.current === docId) {
+        setAgentReports(updatedDoc);
+      }
+      return updatedByDoc;
+    });
   }
 
   // ── Real back-navigation history ─────────────────────────────────────
@@ -418,45 +456,17 @@ function App() {
     historyStackRef.current = [];
   }
 
-
-  // Whenever the selected document changes, throw away any cached agent
-  // report that was generated for a DIFFERENT document. Without this,
-  // stale reports from an earlier upload (e.g. in a long-running browser
-  // tab) can keep showing on Master Agent / agent screens even after a
-  // brand new document has been selected, because agentReports was
-  // previously keyed only by agent id, never by which document it
-  // actually belongs to.
-  useEffect(() => {
-    if (!selectedReportId) return;
-    setAgentReports((prev) => {
-      let changed = false;
-      const next = { ...prev };
-      for (const agentId of Object.keys(prev)) {
-        const entry = prev[agentId];
-        if (entry?.reportId && entry.reportId !== selectedReportId) {
-          next[agentId] = { content: "", preGenerated: null, preGenerating: false, reportId: null };
-          changed = true;
-        }
-      }
-      return changed ? next : prev;
-    });
-  }, [selectedReportId]);
-
-  // Save a snapshot of the current document + generated agent reports into
-  // the OWNING project's localStorage record, whenever either changes.
-  // Uses a reverse lookup (reportId -> project) rather than trusting
-  // whichever project happens to be selected right now, so a background
-  // generation that finishes after the user has already switched projects
-  // still gets saved against the correct project, not the wrong one.
+  // Persist the currently-active document's agent reports into the
+  // OWNING project's localStorage record, per document, whenever either
+  // changes. Uses a reverse lookup (reportId -> project) rather than
+  // trusting whichever project happens to be selected right now, so a
+  // background generation that finishes after the user has already
+  // switched projects still gets saved against the correct project.
   useEffect(() => {
     if (!selectedReportId) return;
     const projectId = selectedProjectItem?.projectId || findProjectIdForReport(selectedReportId);
     if (!projectId) return;
-    persistProjectAgentCache(projectId, {
-      reportId: selectedReportId,
-      report: selectedReport,
-      agentReports,
-    });
+    persistDocAgentCache(projectId, selectedReportId, selectedReport, agentReports);
   }, [agentReports, selectedReportId, selectedReport, selectedProjectItem]);
 
 
@@ -475,14 +485,12 @@ function App() {
     }, 4000);
   }
 
-  // ── Background agent report generation ──────────────────────────────
-  // directContext, when provided, is sent as selectedReportContext so the
-  // backend uses it directly instead of looking up a single reportId in
-  // DynamoDB — this is how multi-document uploads get analysed together:
-  // reportId becomes a synthetic "multi:..." id with no DB record, but the
-  // combined text of every uploaded document is passed straight through.
-  async function generateAgentReportInBackground(reportId, agentId, generateMessage, directContext) {
-    updateAgentReport(agentId, { preGenerating: true, preGenerated: null, reportId });
+  // ── Background agent report generation (per document) ───────────────
+  // Each uploaded document's Master Agent / Audit Planning / FS Review
+  // results are generated and cached completely independently, keyed by
+  // reportId — uploading abc.pdf and xyz.pdf never mixes their content.
+  async function generateAgentReportInBackground(reportId, agentId, generateMessage) {
+    updateDocAgentReport(reportId, agentId, { preGenerating: true, preGenerated: null });
     try {
       const res = await fetch(CHAT_API, {
         method: "POST",
@@ -496,9 +504,6 @@ function App() {
           agent:         agentId,
           generalMode:   false,
           general_mode:  false,
-          ...(directContext
-            ? { selectedReportContext: directContext, direct_context: directContext }
-            : {}),
         }),
       });
       const data = await res.json();
@@ -510,20 +515,20 @@ function App() {
             const statusRes  = await fetch(CHAT_STATUS_API(data.jobId));
             const statusData = await statusRes.json();
             if (statusData.status === "complete") {
-              updateAgentReport(agentId, { preGenerated: statusData, reportId });
+              updateDocAgentReport(reportId, agentId, { preGenerated: statusData });
               return;
             }
             if (statusData.status === "failed") throw new Error(statusData.error);
           } catch {}
         }
       } else {
-        updateAgentReport(agentId, { preGenerated: data, reportId });
+        updateDocAgentReport(reportId, agentId, { preGenerated: data });
       }
     } catch (err) {
       console.error("BG_GENERATE_FAILED:", agentId, err.message);
-      updateAgentReport(agentId, { preGenerated: null, reportId });
+      updateDocAgentReport(reportId, agentId, { preGenerated: null });
     } finally {
-      updateAgentReport(agentId, { preGenerating: false, reportId });
+      updateDocAgentReport(reportId, agentId, { preGenerating: false });
     }
   }
 
@@ -630,32 +635,41 @@ function App() {
     );
   }
 
-  // ── Per-project agent report cache ───────────────────────────────────
-  // Generated reports previously lived ONLY in React state, so leaving a
-  // project and coming back always looked "fresh" — the document and
-  // both agent reports appeared to vanish, even though nothing was
-  // actually lost on the backend. These three helpers persist the last
-  // generated reportId + agentReports snapshot into the SAME localStorage
-  // record the project's file list already uses, so reopening a project
-  // restores exactly what was there before, instead of resetting.
+  // ── Per-document agent report cache (per project) ────────────────────
+  // Generated reports previously lived ONLY in React state and were keyed
+  // per-agent, not per-document — so uploading a second file overwrote
+  // the first file's results, and leaving a project reset everything back
+  // to empty. These helpers persist EVERY document's agentReports
+  // snapshot into the project's localStorage record, keyed by reportId,
+  // so: 1) each uploaded document keeps fully independent results, and
+  // 2) reopening a project restores results for every document, not just
+  // whichever one was open last.
 
-  function loadProjectAgentCache(projectId) {
+  function loadDocAgentCache(projectId, reportId) {
     try {
       const raw = localStorage.getItem("alif_projects_v1");
       const list = raw ? JSON.parse(raw) : [];
       const proj = list.find((p) => p.projectId === projectId);
-      return proj?.agentCache || null;
+      return proj?.agentCachesByDoc?.[reportId] || null;
     } catch { return null; }
   }
 
-  function persistProjectAgentCache(projectId, cache) {
-    if (!projectId) return;
+  function persistDocAgentCache(projectId, reportId, report, agentReportsForDoc) {
+    if (!projectId || !reportId) return;
     try {
       const raw = localStorage.getItem("alif_projects_v1");
       const list = raw ? JSON.parse(raw) : [];
-      const updated = list.map((p) =>
-        p.projectId === projectId ? { ...p, agentCache: cache } : p
-      );
+      const updated = list.map((p) => {
+        if (p.projectId !== projectId) return p;
+        const existingMap = p.agentCachesByDoc || {};
+        return {
+          ...p,
+          agentCachesByDoc: {
+            ...existingMap,
+            [reportId]: { report, agentReports: agentReportsForDoc },
+          },
+        };
+      });
       localStorage.setItem("alif_projects_v1", JSON.stringify(updated));
     } catch {}
   }
@@ -672,12 +686,11 @@ function App() {
 
   // ── Multi-document upload ─────────────────────────────────────────────
   // Lets a user select several files at once. Each file is uploaded and
-  // Textract-processed individually on the backend (that pipeline only
-  // ever knows how to handle one file per call), but once every file has
-  // finished processing, their extracted text is combined into a single
-  // context and sent to the agents together — so "analyse these 3
-  // documents" genuinely means all 3 are considered as one engagement,
-  // not 3 separate unrelated reports.
+  // Textract-processed individually on the backend, and — each uploaded
+  // document ALSO gets its own, fully independent Master Agent / Audit
+  // Planning / FS Review analysis. Nothing is combined: uploading
+  // "abc.pdf" and "xyz.pdf" produces two separate sets of results,
+  // switchable from the sidebar dropdown per document.
   async function handleMultiUpload(event, project) {
     const files = Array.from(event.target.files || []);
     if (files.length === 0) return;
@@ -697,7 +710,6 @@ function App() {
     try {
       setUploading(true);
       setError("");
-      setAgentReports(emptyAgentReportState());
       setActiveProjectAgent(null);
 
       // Snapshot which reportIds already exist BEFORE this upload starts.
@@ -745,8 +757,8 @@ function App() {
           // refuses the upload (expired link, size limit, permissions,
           // anything else), it still resolves normally with a non-2xx
           // status and NO error, so without this check the code would
-          // silently carry on as if every file uploaded fine even when one
-          // genuinely never reached S3 at all.
+          // silently carry on as if every file uploaded fine even when
+          // one genuinely never reached S3 at all.
           if (!putRes.ok) {
             throw new Error(`Upload of "${file.name}" failed (S3 said: ${putRes.status} ${putRes.statusText}).`);
           }
@@ -754,9 +766,9 @@ function App() {
           succeededFiles.push(file);
         } catch (fileErr) {
           // Stop trying further files once one fails, but keep whatever
-          // succeeded BEFORE it — those files really did reach S3 and will
-          // finish processing on the backend regardless, so they must
-          // still be tracked/polled for, not silently abandoned.
+          // succeeded BEFORE it — those files really did reach S3 and
+          // will finish processing on the backend regardless, so they
+          // must still be tracked/polled for, not silently abandoned.
           uploadError = fileErr;
           break;
         }
@@ -784,6 +796,16 @@ function App() {
     } finally { setUploading(false); }
   }
 
+  // File names get sanitized somewhere in the upload pipeline (spaces,
+  // dashes, etc. often become underscores by the time a document comes
+  // back from processing), so comparing the stored name against the raw
+  // browser filename via endsWith() can fail even for the correct file.
+  // Normalizing both sides to the same "only letters/digits" form before
+  // comparing makes the match resilient to that kind of cosmetic rewrite.
+  function normalizeFileNameForMatch(name) {
+    return (name || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  }
+
   function startBatchPolling(fileNames, project, existingIds) {
     stopPolling();
     startProgressSimulation();
@@ -804,8 +826,10 @@ function App() {
           if (!isDone) continue;
           const docId = getReportId(doc);
           if (!docId || seenIds.has(docId)) continue; // pre-existing or already matched — skip
-          const name = getReportName(doc);
-          const matchedFileName = [...remainingNames].find((fn) => name && name.endsWith(fn));
+          const name = normalizeFileNameForMatch(getReportName(doc));
+          const matchedFileName = [...remainingNames].find(
+            (fn) => name && name.endsWith(normalizeFileNameForMatch(fn))
+          );
           if (matchedFileName) {
             foundDocs.push(doc);
             seenIds.add(docId);
@@ -827,111 +851,64 @@ function App() {
     }, 10000);
   }
 
+  // Every uploaded document is treated INDEPENDENTLY: the first one
+  // becomes the active document shown right away, and every document
+  // (including the rest of the batch) gets its own background Master /
+  // Audit Planning / FS Review generation kicked off immediately, so
+  // expanding a different file's dropdown in the sidebar later is
+  // instant rather than waiting from scratch.
   async function finalizeBatchUpload(docs, project) {
     if (docs.length === 0) return;
 
-    // Exactly one file behaved before — keep it identical, no batch wrapper.
-    if (docs.length === 1) {
-      const only = docs[0];
-      const id   = getReportId(only);
-      setSelectedReport(only);
-      setSelectedReportId(id);
-      if (!project) navigateTo(VIEW_UPLOAD);
-      if (project) recordProjectFile(project.projectId, id, { name: getReportName(only) });
+    const first   = docs[0];
+    const firstId = getReportId(first);
+
+    setSelectedReport(first);
+    setSelectedReportId(firstId);
+    setAgentReports(emptyAgentReportState());
+    if (!project) navigateTo(VIEW_UPLOAD);
+
+    docs.forEach((d) => {
+      const id = getReportId(d);
+      if (project) recordProjectFile(project.projectId, id, { name: getReportName(d) });
       generateAgentReportInBackground(id, "audit_planning_agent", AGENT_GENERATE_MESSAGES.audit_planning_agent);
       generateAgentReportInBackground(id, "fs_review_agent", AGENT_GENERATE_MESSAGES.fs_review_agent);
-      return;
-    }
+    });
 
-    // Multiple files — wrap them in a synthetic "batch" report so all the
-    // existing reportId-keyed caching/staleness logic keeps working
-    // unchanged, then generate each agent's report against the COMBINED
-    // text of every uploaded document.
-    const batchId = `batch-${Date.now()}`;
-    const names = docs.map((d) => getReportName(d));
-
-    const combinedReport = {
-      reportId: batchId,
-      source_file: `${docs.length} documents (${names.join(", ")})`,
-      isBatch: true,
-      batchDocs: docs.map((d) => ({ reportId: getReportId(d), name: getReportName(d) })),
-    };
-
-    setSelectedReport(combinedReport);
-    setSelectedReportId(batchId);
-    if (!project) navigateTo(VIEW_UPLOAD);
+    // Auto-expand every newly uploaded document's sidebar dropdown so the
+    // user immediately sees where their new agent reports are appearing.
     if (project) {
-      docs.forEach((d) => recordProjectFile(project.projectId, getReportId(d), { name: getReportName(d) }));
-    }
-
-    generateCombinedAgentReport(batchId, docs, "audit_planning_agent", AGENT_GENERATE_MESSAGES.audit_planning_agent);
-    generateCombinedAgentReport(batchId, docs, "fs_review_agent", AGENT_GENERATE_MESSAGES.fs_review_agent);
-  }
-
-  async function generateCombinedAgentReport(batchId, docs, agentId, generateMessage) {
-    updateAgentReport(agentId, { preGenerating: true, preGenerated: null, reportId: batchId });
-    try {
-      const texts = await Promise.all(
-        docs.map(async (d) => {
-          const id   = getReportId(d);
-          const full = await fetchReportById(id);
-          const text = getReportMarkdown(full) || getReportMarkdown(d) || "";
-          return `=== DOCUMENT: ${getReportName(d)} ===\n${text}`;
-        })
-      );
-      const combinedContext = texts.join("\n\n");
-
-      const res = await fetch(CHAT_API, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message:                generateMessage,
-          question:               generateMessage,
-          sessionId:              `bg-${agentId}-${batchId}`,
-          reportId:                batchId,
-          selectedReportContext:  combinedContext,
-          selectedAgent:          agentId,
-          agent:                  agentId,
-          generalMode:            false,
-          general_mode:           false,
-        }),
+      setExpandedFileIds((prev) => {
+        const next = new Set(prev);
+        docs.forEach((d) => { const id = getReportId(d); if (id) next.add(id); });
+        return next;
       });
-      const data = await res.json();
-
-      if (data.status === "processing" && data.jobId) {
-        for (let attempt = 0; attempt < 60; attempt++) {
-          await sleep(2500);
-          try {
-            const statusRes  = await fetch(CHAT_STATUS_API(data.jobId));
-            const statusData = await statusRes.json();
-            if (statusData.status === "complete") {
-              updateAgentReport(agentId, { preGenerated: statusData, reportId: batchId });
-              return;
-            }
-            if (statusData.status === "failed") throw new Error(statusData.error);
-          } catch {}
-        }
-      } else {
-        updateAgentReport(agentId, { preGenerated: data, reportId: batchId });
-      }
-    } catch (err) {
-      console.error("BATCH_GENERATE_FAILED:", agentId, err.message);
-      updateAgentReport(agentId, { preGenerated: null, reportId: batchId });
-    } finally {
-      updateAgentReport(agentId, { preGenerating: false, reportId: batchId });
     }
   }
 
   async function selectPortal(type) {
     resetHistory();
     setPortal(type);
+
+    // Switching portals always starts completely fresh — leftover
+    // project/document state from a previous portal must never bleed
+    // into a different portal's sidebar. Without this, opening the User
+    // Portal after having worked in the Audit Portal would still show the
+    // Audit Portal's uploaded documents and per-document agent dropdowns.
+    setSelectedProjectItem(null);
+    setActiveProjectAgent(null);
+    setSelectedAgent(null);
+    setSelectedReport(null);
+    setSelectedReportId("");
+    setAgentReports(emptyAgentReportState());
+    setAgentReportsByDoc({});
+    setExpandedFileIds(new Set());
+
     if (type === "manager") {
       const list = await fetchReports();
       setReports(list);
       setView(VIEW_MANAGER_HOME);
     } else if (type === "audit") {
-      setSelectedProjectItem(null);
-      setActiveProjectAgent(null);
       setView(VIEW_PROJECTS);
     } else {
       setView(VIEW_HOME);
@@ -961,6 +938,61 @@ function App() {
     setSelectedAgent(agent);
     updateAgentReport(agent.id, { content: "" });
     navigateTo(VIEW_AGENT);
+  }
+
+  // Toggles a single uploaded file's sidebar dropdown open/closed.
+  function toggleFileExpanded(docId) {
+    if (!docId) return;
+    setExpandedFileIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(docId)) next.delete(docId);
+      else next.add(docId);
+      return next;
+    });
+  }
+
+  // Switches the active document to a SPECIFIC uploaded file (from the
+  // sidebar dropdown) and jumps straight to the requested agent's view.
+  // agentKey is "master", "audit_planning_agent", or "fs_review_agent".
+  // Reuses in-memory cache first, then the persisted per-project cache,
+  // and only kicks off a fresh generation if neither exists yet.
+  function openDocumentAgent(file, agentKey) {
+    if (!file?.reportId) return;
+    const reportId = file.reportId;
+
+    setSelectedReportId(reportId);
+    setSelectedReport(null);
+
+    const cachedInMemory = agentReportsByDoc[reportId];
+    if (cachedInMemory) {
+      setAgentReports(cachedInMemory);
+      fetchReportById(reportId).then((full) => { if (full) setSelectedReport(full); });
+    } else {
+      const persisted = selectedProjectItem ? loadDocAgentCache(selectedProjectItem.projectId, reportId) : null;
+      if (persisted?.agentReports) {
+        setAgentReports(persisted.agentReports);
+        setAgentReportsByDoc((prev) => ({ ...prev, [reportId]: persisted.agentReports }));
+        if (persisted.report) setSelectedReport(persisted.report);
+        else fetchReportById(reportId).then((full) => { if (full) setSelectedReport(full); });
+      } else {
+        setAgentReports(emptyAgentReportState());
+        fetchReportById(reportId).then((full) => { if (full) setSelectedReport(full); });
+        generateAgentReportInBackground(reportId, "audit_planning_agent", AGENT_GENERATE_MESSAGES.audit_planning_agent);
+        generateAgentReportInBackground(reportId, "fs_review_agent", AGENT_GENERATE_MESSAGES.fs_review_agent);
+      }
+    }
+
+    if (agentKey === "master") {
+      setActiveProjectAgent(null);
+      setSelectedAgent(null);
+      navigateTo(VIEW_MASTER_AGENT);
+    } else {
+      const agent = SUB_AGENTS.find((a) => a.id === agentKey);
+      if (!agent || !agent.available) return;
+      setActiveProjectAgent(agent.id);
+      setSelectedAgent(agent);
+      navigateTo(VIEW_AGENT);
+    }
   }
 
   async function openManagerChat(report) {
@@ -1161,7 +1193,7 @@ function App() {
           <span className="sidebar-projects-label">Projects</span>
         </button>
 
-        {selectedProjectItem && (
+        {portal === "audit" && selectedProjectItem && (
           <div className="sidebar-section sidebar-project-agents">
             <div className="sidebar-section-title">{selectedProjectItem.projectName}</div>
 
@@ -1189,52 +1221,82 @@ function App() {
               <span className="sidebar-agent-label">Files &amp; Assets</span>
             </button>
 
-            {selectedReportId && (
-              <button
-                className={`sidebar-agent-btn ${view === VIEW_MASTER_AGENT ? "sidebar-agent-active" : ""}`}
-                onClick={() => navigateTo(VIEW_MASTER_AGENT)}
-              >
-                <span className="sidebar-agent-icon">🧠</span>
-                <span className="sidebar-agent-label">Master Agent</span>
-                {(agentReports.audit_planning_agent?.preGenerating || agentReports.fs_review_agent?.preGenerating) && (
-                  <span className="sidebar-agent-status status-generating">Preparing</span>
-                )}
-                {!(agentReports.audit_planning_agent?.preGenerating || agentReports.fs_review_agent?.preGenerating) &&
-                  agentReports.audit_planning_agent?.preGenerated && agentReports.fs_review_agent?.preGenerated && (
-                  <span className="sidebar-agent-status status-ready">Ready</span>
-                )}
-              </button>
-            )}
+            {/* ── Per-document dropdowns ──────────────────────────────
+                Every uploaded file gets its own collapsible group here.
+                Expanding a file reveals Master Agent / Audit Planning
+                Agent / Financial Statement Review Agent, each scoped to
+                THAT specific document — clicking a different file's
+                dropdown switches the active document, never mixing
+                results between files. */}
+            {(selectedProjectItem.files || []).length > 0 && (
+              <div className="sidebar-doc-list">
+                {selectedProjectItem.files.map((f) => {
+                  const docId       = f.reportId;
+                  const isExpanded  = docId && expandedFileIds.has(docId);
+                  const docState    = docId ? agentReportsByDoc[docId] : null;
+                  const isActiveDoc = !!docId && docId === selectedReportId;
+                  const masterPreparing =
+                    !!docState && (docState.audit_planning_agent?.preGenerating || docState.fs_review_agent?.preGenerating);
+                  const masterReady =
+                    !!docState && !!docState.audit_planning_agent?.preGenerated && !!docState.fs_review_agent?.preGenerated;
 
-            {selectedReportId && SUB_AGENTS.map((agent) => (
-              <button
-                key={agent.id}
-                className={`sidebar-agent-btn ${activeProjectAgent === agent.id ? "sidebar-agent-active" : ""} ${!agent.available ? "sidebar-agent-disabled" : ""}`}
-                disabled={!agent.available}
-                onClick={() => {
-                  if (!agent.available) return;
-                  setActiveProjectAgent(agent.id);
-                  setSelectedAgent(agent);
-                  updateAgentReport(agent.id, { content: "" });
-                  navigateTo(VIEW_AGENT);
-                }}
-              >
-                <span className="sidebar-agent-icon">{agent.icon}</span>
-                <span className="sidebar-agent-label">{agent.label}</span>
-                {agent.available ? (
-                  <>
-                    {agentReports[agent.id]?.preGenerating && (
-                      <span className="sidebar-agent-status status-generating">Preparing</span>
-                    )}
-                    {!agentReports[agent.id]?.preGenerating && agentReports[agent.id]?.preGenerated && (
-                      <span className="sidebar-agent-status status-ready">Ready</span>
-                    )}
-                  </>
-                ) : (
-                  <span className="sidebar-agent-status status-soon">Soon</span>
-                )}
-              </button>
-            ))}
+                  return (
+                    <div className="sidebar-doc-group" key={f.fileId}>
+                      <button
+                        className={`sidebar-doc-toggle ${isActiveDoc ? "sidebar-doc-toggle-active" : ""}`}
+                        onClick={() => toggleFileExpanded(docId)}
+                        disabled={!docId}
+                        title={docId ? f.name : "Not yet linked to a processed document"}
+                      >
+                        <span className="sidebar-doc-icon">📄</span>
+                        <span className="sidebar-doc-label">{f.name}</span>
+                        {masterPreparing && <span className="sidebar-agent-status status-generating">⏳</span>}
+                        {!masterPreparing && masterReady && <span className="sidebar-agent-status status-ready">✅</span>}
+                        <span className={`sidebar-doc-chevron ${isExpanded ? "sidebar-doc-chevron-open" : ""}`}>▾</span>
+                      </button>
+
+                      {isExpanded && docId && (
+                        <div className="sidebar-doc-agents">
+                          <button
+                            className={`sidebar-agent-btn sidebar-agent-btn-nested ${isActiveDoc && view === VIEW_MASTER_AGENT ? "sidebar-agent-active" : ""}`}
+                            onClick={() => openDocumentAgent(f, "master")}
+                          >
+                            <span className="sidebar-agent-icon">🧠</span>
+                            <span className="sidebar-agent-label">Master Agent</span>
+                            {masterPreparing && <span className="sidebar-agent-status status-generating">Preparing</span>}
+                            {!masterPreparing && masterReady && <span className="sidebar-agent-status status-ready">Ready</span>}
+                          </button>
+
+                          {SUB_AGENTS.map((agent) => (
+                            <button
+                              key={agent.id}
+                              className={`sidebar-agent-btn sidebar-agent-btn-nested ${isActiveDoc && view === VIEW_AGENT && selectedAgent?.id === agent.id ? "sidebar-agent-active" : ""} ${!agent.available ? "sidebar-agent-disabled" : ""}`}
+                              disabled={!agent.available}
+                              onClick={() => openDocumentAgent(f, agent.id)}
+                            >
+                              <span className="sidebar-agent-icon">{agent.icon}</span>
+                              <span className="sidebar-agent-label">{agent.label}</span>
+                              {agent.available ? (
+                                <>
+                                  {docState?.[agent.id]?.preGenerating && (
+                                    <span className="sidebar-agent-status status-generating">Preparing</span>
+                                  )}
+                                  {!docState?.[agent.id]?.preGenerating && docState?.[agent.id]?.preGenerated && (
+                                    <span className="sidebar-agent-status status-ready">Ready</span>
+                                  )}
+                                </>
+                              ) : (
+                                <span className="sidebar-agent-status status-soon">Soon</span>
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
 
@@ -1330,23 +1392,12 @@ function App() {
                   <div className="option-title">Upload Financial Document(s)</div>
                   <div className="option-desc">
                     Upload one or more financial statements — select several at once
-                    with the ➕ picker and the AI agents will analyse them together as
-                    a single engagement.
+                    with the ➕ picker. Each document gets its own independent Master
+                    Agent, Audit Planning, and Financial Statement Review results.
                   </div>
                 </div>
                 <div className="option-arrow">→</div>
               </label>
-              <button className="home-option-card qa-card" onClick={() => setQaPopupOpen(true)}>
-                <div className="option-icon">💬</div>
-                <div className="option-body">
-                  <div className="option-title">Ask a Question</div>
-                  <div className="option-desc">
-                    Ask anything about UAE Corporate Tax, VAT regulations, IFRS standards,
-                    audit procedures, or general financial compliance topics.
-                  </div>
-                </div>
-                <div className="option-arrow">→</div>
-              </button>
             </div>
             {uploading && <div className="home-status">⬆️ Uploading your document…</div>}
           </div>
@@ -1526,16 +1577,33 @@ function App() {
               onOpenProject={(project) => {
                 setSelectedProjectItem(project);
                 setActiveProjectAgent(null);
-                // Restore whatever document + agent reports were last
-                // generated for this project, if any. Only reset to empty
-                // when this project genuinely has nothing cached yet —
-                // previously this always reset, so leaving a project and
-                // coming back looked like everything had vanished.
-                const cache = loadProjectAgentCache(project.projectId);
-                if (cache && cache.reportId) {
-                  setSelectedReport(cache.report || null);
-                  setSelectedReportId(cache.reportId);
-                  setAgentReports(cache.agentReports || emptyAgentReportState());
+
+                // Restore EVERY document's cached agent reports for this
+                // project (not just the last one), so any file's sidebar
+                // dropdown can be expanded and show instantly.
+                const cachesByDoc = project.agentCachesByDoc || {};
+                const restored = {};
+                for (const [docId, entry] of Object.entries(cachesByDoc)) {
+                  if (entry?.agentReports) restored[docId] = entry.agentReports;
+                }
+                setAgentReportsByDoc(restored);
+                setExpandedFileIds(new Set());
+
+                const files = project.files || [];
+                if (files.length > 0 && files[0].reportId) {
+                  const latestId = files[0].reportId;
+                  const cached   = restored[latestId];
+                  setSelectedReportId(latestId);
+                  setAgentReports(cached || emptyAgentReportState());
+
+                  const cachedReport = cachesByDoc[latestId]?.report;
+                  if (cachedReport) setSelectedReport(cachedReport);
+                  else fetchReportById(latestId).then((full) => { if (full) setSelectedReport(full); });
+
+                  if (!cached) {
+                    generateAgentReportInBackground(latestId, "audit_planning_agent", AGENT_GENERATE_MESSAGES.audit_planning_agent);
+                    generateAgentReportInBackground(latestId, "fs_review_agent", AGENT_GENERATE_MESSAGES.fs_review_agent);
+                  }
                 } else {
                   setSelectedReport(null);
                   setSelectedReportId("");
@@ -1711,7 +1779,7 @@ function App() {
             <div className="pd-view">
               <div className="pf-header">
                 <div className="pf-title">Files and Assets</div>
-                <div className="pf-subtitle">Documents and attachments that have been uploaded as part of this project.</div>
+                <div className="pf-subtitle">Documents and attachments that have been uploaded as part of this project. Each file gets its own Master Agent, Audit Planning, and Financial Statement Review results — expand it from the sidebar on the left to view them.</div>
               </div>
 
               <label className="pf-dropzone">
@@ -1723,7 +1791,7 @@ function App() {
                 <div className="pf-dropzone-title">
                   {uploading ? "Uploading…" : processing ? "Processing…" : "➕ Click to upload one or more files"}
                 </div>
-                <div className="pf-dropzone-sub">PDF, DOC, PNG, JPG (max 20MB each) — select several to analyse them as one engagement</div>
+                <div className="pf-dropzone-sub">PDF, DOC, PNG, JPG (max 20MB each) — each file gets its own separate agent analysis</div>
               </label>
 
               <div className="pf-files-section">
@@ -1739,21 +1807,45 @@ function App() {
                       <div>Uploaded</div>
                       <div></div>
                     </div>
-                    {selectedProjectItem.files.map((f) => (
-                      <div className="pf-table-row" key={f.fileId}>
-                        <div className="pf-file-name">📄 {f.name}</div>
-                        <div className="pf-file-size">{formatFileSize(f.size)}</div>
-                        <div className="pf-file-date">{formatDate(f.uploadedAt)}</div>
-                        <div className="pf-file-actions">
-                          <button
-                            className="pf-delete-btn"
-                            onClick={() => deleteProjectFile(selectedProjectItem.projectId, f.fileId)}
-                          >
-                            Delete
-                          </button>
+                    {selectedProjectItem.files.map((f) => {
+                      const docState    = f.reportId ? agentReportsByDoc[f.reportId] : null;
+                      const isActive    = !!f.reportId && f.reportId === selectedReportId;
+                      const isPreparing = !!docState && (docState.audit_planning_agent?.preGenerating || docState.fs_review_agent?.preGenerating);
+                      const isReady     = !!docState && !!docState.audit_planning_agent?.preGenerated && !!docState.fs_review_agent?.preGenerated;
+                      return (
+                        <div className={`pf-table-row ${isActive ? "pf-table-row-active" : ""}`} key={f.fileId}>
+                          <div className="pf-file-name">
+                            <button
+                              className="pf-file-name-btn"
+                              onClick={() => openDocumentAgent(f, "master")}
+                              disabled={!f.reportId}
+                              title={f.reportId ? "View Master / Audit Planning / FS Review results for this document" : "Not linked to a processed document"}
+                            >
+                              📄 {f.name}
+                            </button>
+                            {isPreparing && <span className="pf-file-status-pill preparing">⏳ Preparing</span>}
+                            {isReady && <span className="pf-file-status-pill ready">✅ Ready</span>}
+                          </div>
+                          <div className="pf-file-size">{formatFileSize(f.size)}</div>
+                          <div className="pf-file-date">{formatDate(f.uploadedAt)}</div>
+                          <div className="pf-file-actions">
+                            <button
+                              className="pf-view-btn"
+                              onClick={() => openDocumentAgent(f, "master")}
+                              disabled={!f.reportId}
+                            >
+                              View Agents →
+                            </button>
+                            <button
+                              className="pf-delete-btn"
+                              onClick={() => deleteProjectFile(selectedProjectItem.projectId, f.fileId)}
+                            >
+                              Delete
+                            </button>
+                          </div>
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </div>

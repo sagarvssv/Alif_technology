@@ -1,4 +1,4 @@
-/* ─── Projects View ──────────────────────────────────────────────────── */
+/* ─── Projects View ──────────────────────────────────────────────── */
 
 .projects-view {
   flex: 1;
@@ -55,7 +55,7 @@
   cursor: pointer;
 }
 
-/* ─── Create Project Form ────────────────────────────────────────────── */
+/* ─── Create Project Form ────────────────────────────────────────── */
 
 .project-form {
   max-width: 640px;
@@ -150,13 +150,14 @@
 .project-form-cancel:hover { background: #eef2f7; }
 
 .project-form-submit {
-  background: var(--at-blue);
+  background: linear-gradient(135deg, var(--at-blue) 0%, var(--at-violet) 100%);
   color: #fff;
+  box-shadow: 0 4px 14px rgba(37,99,235,0.3);
 }
-.project-form-submit:hover:not(:disabled) { background: var(--at-blue-mid); }
+.project-form-submit:hover:not(:disabled) { box-shadow: 0 6px 20px rgba(37,99,235,0.42); }
 .project-form-submit:disabled { opacity: 0.6; cursor: not-allowed; }
 
-/* ─── Existing Projects List ─────────────────────────────────────────── */
+/* ─── Existing Projects: empty / loading states ──────────────────── */
 
 .projects-muted {
   color: var(--text-muted);
@@ -183,6 +184,10 @@
   cursor: pointer;
 }
 .projects-empty-cta:hover { background: var(--at-blue-mid); }
+
+/* ─── Legacy card/grid + modal styles (kept, currently unused by the
+   table-based list below, but harmless to leave in case any other
+   view still references them) ─────────────────────────────────────── */
 
 .projects-grid {
   display: grid;
@@ -266,7 +271,7 @@
   padding-top: 6px;
 }
 
-/* ─── Project Detail Modal ───────────────────────────────────────────── */
+/* ─── Project Detail Modal (legacy, unused by current flow) ──────── */
 
 .project-modal-overlay {
   position: fixed;
@@ -363,7 +368,7 @@
   .project-form  { padding: 18px; }
 }
 
-/* ─── Projects Toolbar (title + filters + search + add) ────────────── */
+/* ─── Projects Toolbar (title + filters + search + add) ──────────── */
 
 .projects-back-link {
   display: inline-flex;
@@ -466,15 +471,19 @@
   border: none;
   border-radius: 999px;
   padding: 9px 18px;
-  background: var(--at-blue);
+  background: linear-gradient(135deg, var(--at-blue) 0%, var(--at-violet) 100%);
   color: #fff;
   font-size: 13px;
   font-weight: 700;
   cursor: pointer;
   white-space: nowrap;
-  transition: background 0.15s;
+  box-shadow: 0 4px 14px rgba(37,99,235,0.35);
+  transition: transform 0.12s, box-shadow 0.15s;
 }
-.projects-add-btn:hover { background: var(--at-blue-mid, #1e40af); }
+.projects-add-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(37,99,235,0.45);
+}
 
 .projects-delete-btn {
   display: inline-flex;
@@ -494,38 +503,17 @@
 .projects-delete-btn:hover:not(:disabled) { background: #b91c1c; }
 .projects-delete-btn:disabled { opacity: 0.6; cursor: not-allowed; }
 
-/* ─── Project Row List ──────────────────────────────────────────────── */
-
-.projects-list {
-  display: flex;
-  flex-direction: column;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  overflow: hidden;
-  background: var(--white);
-}
-
-.project-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  background: var(--white);
-  border-bottom: 1px solid var(--border);
-  transition: background 0.15s;
-}
-
-.project-row:last-child { border-bottom: none; }
-.project-row:hover { background: var(--surface); }
+/* ─── Projects Table — matches the reference screenshot ──────────────
+   These class names are exactly what Projects.jsx renders:
+   projects-table-wrap > projects-table > projects-table-header-row +
+   projects-table-row (one per project). ───────────────────────────── */
 
 .project-row-radio {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 14px 0 14px 18px;
   cursor: pointer;
 }
-
 .project-row-radio input[type="radio"] {
   width: 16px;
   height: 16px;
@@ -533,65 +521,109 @@
   cursor: pointer;
 }
 
-.project-row-main {
-  display: flex;
+.projects-table-wrap {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  box-shadow: var(--shadow-sm);
+  background: var(--white);
+}
+
+.projects-table {
+  width: 100%;
+}
+
+.projects-table-header-row,
+.projects-table-row {
+  display: grid;
+  grid-template-columns: 40px 1.3fr 1.1fr 0.9fr 0.9fr 0.9fr 0.9fr 40px;
   align-items: center;
-  gap: 14px;
-  flex: 1;
-  min-width: 0;
-  padding: 14px 18px 14px 8px;
-  background: none;
+  gap: 12px;
+  padding: 0 16px;
+}
+
+.projects-table-header-row {
+  background: var(--at-navy, #0f1b2d);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding-top: 14px;
+  padding-bottom: 14px;
+}
+
+.projects-table-row {
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+  padding-bottom: 14px;
+  transition: background 0.12s;
+}
+.projects-table-row:hover { background: var(--surface); }
+
+.projects-table-check-col,
+.projects-table-arrow-col { width: 100%; }
+
+.projects-table-name-btn {
   border: none;
-  cursor: pointer;
-  text-align: left;
-}
-
-.project-row-thumb {
-  width: 42px;
-  height: 42px;
-  flex-shrink: 0;
-  border-radius: var(--radius-sm);
-  background: linear-gradient(135deg, var(--at-blue) 0%, var(--at-accent) 100%);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 18px;
-}
-
-.project-row-body { flex: 1; min-width: 0; }
-
-.project-row-name {
+  background: none;
+  padding: 0;
+  font: inherit;
   font-size: 14px;
-  font-weight: 700;
+  font-weight: 800;
   color: var(--at-blue-mid, #1e40af);
-  margin-bottom: 3px;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
+.projects-table-name-btn:hover { text-decoration: underline; }
 
-.project-row-meta {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--text-muted);
+.projects-table-cell {
+  font-size: 13.5px;
+  color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.project-row-dot { opacity: 0.5; }
-.project-row-check { font-size: 12px; }
+.projects-table-date { font-weight: 700; }
+.projects-table-date-start { color: var(--at-blue, #1a56db); }
+.projects-table-date-end   { color: var(--at-gold, #f59e0b); }
 
-.project-row-arrow {
-  flex-shrink: 0;
-  width: 30px;
-  height: 30px;
-  border-radius: 50%;
+.projects-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.projects-status-pill.status-active   { background: #dcfce7; color: #166534; }
+.projects-status-pill.status-inactive { background: #f1f5f9; color: #475569; }
+
+.projects-table-open-btn {
+  border: none;
   background: var(--surface);
+  border-radius: 50%;
+  width: 26px;
+  height: 26px;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 18px;
   color: var(--text-muted);
+  font-size: 15px;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.projects-table-open-btn:hover { background: var(--at-blue-lt, #dbeafe); color: var(--at-blue-mid, #1e40af); }
+
+@media (max-width: 900px) {
+  .projects-table-wrap { overflow-x: auto; }
+  .projects-table { min-width: 760px; }
 }
 
 @media (max-width: 700px) {

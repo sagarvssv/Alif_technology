@@ -90,6 +90,7 @@ const EMPTY_FORM = {
   contactNumber: "",
   ceo: "",
   principalContact: "",
+  owner: "",
 
   // Audit scope
   auditPeriodStart: "",
@@ -169,6 +170,7 @@ function Projects({ onOpenProject }) {
       contactNumber: form.contactNumber.trim(),
       ceo: form.ceo.trim(),
       principalContact: form.principalContact.trim(),
+      owner: form.owner.trim(),
 
       auditPeriodStart: form.auditPeriodStart,
       auditPeriodEnd: form.auditPeriodEnd,
@@ -307,7 +309,7 @@ function Projects({ onOpenProject }) {
           <div className="project-form-section-title">Company Details</div>
 
           <div className="project-form-field">
-            <label>Company Name</label>
+            <label>Company Name (Audit Company)</label>
             <input
               type="text"
               placeholder="Official registered name of the business"
@@ -403,14 +405,25 @@ function Projects({ onOpenProject }) {
             </div>
           </div>
 
-          <div className="project-form-field">
-            <label>Principal Contact Person</label>
-            <input
-              type="text"
-              placeholder="Name and role of the main point of contact"
-              value={form.principalContact}
-              onChange={(e) => updateField("principalContact", e.target.value)}
-            />
+          <div className="project-form-row">
+            <div className="project-form-field">
+              <label>Principal Contact Person</label>
+              <input
+                type="text"
+                placeholder="Name and role of the main point of contact"
+                value={form.principalContact}
+                onChange={(e) => updateField("principalContact", e.target.value)}
+              />
+            </div>
+            <div className="project-form-field">
+              <label>Owner</label>
+              <input
+                type="text"
+                placeholder="Person responsible for this engagement internally"
+                value={form.owner}
+                onChange={(e) => updateField("owner", e.target.value)}
+              />
+            </div>
           </div>
 
           <div className="project-form-section-title">Audit Scope</div>
@@ -531,39 +544,72 @@ function Projects({ onOpenProject }) {
             <p className="projects-muted">No projects match your search/filter.</p>
           )}
 
-          <div className="projects-list">
-            {getVisibleProjects().map((p) => {
-              const isActive = (p.status || "Active").toLowerCase() === "active";
-              return (
-                <div key={p.projectId} className="project-row">
-                  <label className="project-row-radio" onClick={(e) => e.stopPropagation()}>
-                    <input
-                      type="radio"
-                      name="project-delete-select"
-                      checked={selectedForDelete === p.projectId}
-                      onChange={() =>
-                        setSelectedForDelete((prev) => (prev === p.projectId ? null : p.projectId))
-                      }
-                    />
-                  </label>
-
-                  <button className="project-row-main" onClick={() => openProject(p)}>
-                    <div className="project-row-thumb">📁</div>
-                    <div className="project-row-body">
-                      <div className="project-row-name">{p.projectName}</div>
-                      <div className="project-row-meta">
-                        <span>📅 {formatDateOnly(p.createdAt)}</span>
-                        <span className="project-row-dot">·</span>
-                        <span>📄 {p.legalName || p.companyAuditName || p.entityType || "—"}</span>
-                        {isActive && <span className="project-row-check">✅</span>}
-                      </div>
-                    </div>
-                    <span className="project-row-arrow">›</span>
-                  </button>
+          {!loading && getVisibleProjects().length > 0 && (
+            <div className="projects-table-wrap">
+              <div className="projects-table">
+                <div className="projects-table-header-row">
+                  <div className="projects-table-check-col"></div>
+                  <div>Project Name</div>
+                  <div>Audit Company</div>
+                  <div>Audit Start</div>
+                  <div>Audit End</div>
+                  <div>Owner</div>
+                  <div>Status</div>
+                  <div className="projects-table-arrow-col"></div>
                 </div>
-              );
-            })}
-          </div>
+
+                {getVisibleProjects().map((p) => {
+                  const isActive = (p.status || "Active").toLowerCase() === "active";
+                  return (
+                    <div key={p.projectId} className="projects-table-row">
+                      <label className="project-row-radio" onClick={(e) => e.stopPropagation()}>
+                        <input
+                          type="radio"
+                          name="project-delete-select"
+                          checked={selectedForDelete === p.projectId}
+                          onChange={() =>
+                            setSelectedForDelete((prev) => (prev === p.projectId ? null : p.projectId))
+                          }
+                        />
+                      </label>
+
+                      <button className="projects-table-name-btn" onClick={() => openProject(p)}>
+                        {p.projectName}
+                      </button>
+
+                      <div className="projects-table-cell">
+                        {p.legalName || p.companyAuditName || p.entityType || "—"}
+                      </div>
+
+                      <div className="projects-table-cell projects-table-date projects-table-date-start">
+                        {formatDateOnly(p.auditPeriodStart) || "—"}
+                      </div>
+
+                      <div className="projects-table-cell projects-table-date projects-table-date-end">
+                        {formatDateOnly(p.auditPeriodEnd) || "—"}
+                      </div>
+
+                      <div className="projects-table-cell">{p.owner || "—"}</div>
+
+                      <div className="projects-table-cell">
+                        <span className={`projects-status-pill ${isActive ? "status-active" : "status-inactive"}`}>
+                          {isActive ? "✅ Active" : (p.status || "Inactive")}
+                        </span>
+                      </div>
+
+                      <button
+                        className="projects-table-open-btn"
+                        onClick={() => openProject(p)}
+                        aria-label={`Open ${p.projectName}`}
+                      >
+                        ›
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
