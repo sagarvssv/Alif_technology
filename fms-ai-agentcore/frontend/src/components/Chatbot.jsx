@@ -161,7 +161,8 @@ function removeSourcesFromAnswer(answer = "") {
 }
 
 function isAuditReport(content = "") {
-  return content.includes("Risk Assessment") || content.includes("Engagement Strategy");
+  return content.includes("Risk Assessment") || content.includes("Engagement Strategy") ||
+    content.includes("Standard Reference") || content.includes("Risk Rating");
 }
 
 function getReportName(report) {
@@ -416,20 +417,20 @@ function AuditHeading({ tag: Tag, children }) {
 }
 
 function buildComponents(isAudit, riskData, onBadgeClick) {
-  if (!isAudit) {
-    return {
-      h1: ({ children }) => <h2>{children}</h2>,
-      h2: ({ children }) => <h3>{children}</h3>,
-      h3: ({ children }) => <h4>{children}</h4>,
-    };
-  }
   const allItems   = [...(riskData?.needsAttention || []), ...(riskData?.improved || [])];
   const itemByArea = new Map(allItems.map((item) => [item.area.toLowerCase().trim(), item]));
   let pendingArea  = "";
-  return {
+
+  const headingComponents = {
     h1: ({ children }) => <AuditHeading tag="h2">{children}</AuditHeading>,
     h2: ({ children }) => <AuditHeading tag="h3">{children}</AuditHeading>,
     h3: ({ children }) => <AuditHeading tag="h4">{children}</AuditHeading>,
+  };
+
+  if (!isAudit) return headingComponents;
+
+  return {
+    ...headingComponents,
     tr: ({ children }) => {
       const cells = React.Children.toArray(children);
       if (cells.length > 0) {
@@ -457,17 +458,22 @@ function buildComponents(isAudit, riskData, onBadgeClick) {
 // ─── Main Chatbot ─────────────────────────────────────────────────────
 function Chatbot({
   reportId,
+  reportIds,
   selectedReport,
   generalMode,
   managerMode,
   preGeneratedReport,
   preGenerating,
   onReportGenerated,
+  agentId = "audit_planning_agent",
+  agentLabel = "Audit Planning Agent",
+  generateMessage = "Generate audit planning.",
 }) {
   const inputRef       = useRef(null);
   const messagesEndRef = useRef(null);
   const preShownRef    = useRef(false);
   const sendOnceRef    = useRef(false);
+  const wasGeneratingRef = useRef(false);
 
   const [sessionId,    setSessionId]    = useState(createSessionId());
   const [messages,     setMessages]     = useState([]);
@@ -479,7 +485,7 @@ function Chatbot({
   function getWelcomeMessage() {
     if (generalMode) return "Hi 👋 Ask me anything about UAE Corporate Tax, VAT, IFRS, audit standards, or general financial compliance. I will answer from the Knowledge Base only.";
     if (managerMode && selectedReport) return `Hi 👋 You are viewing **${getReportName(selectedReport)}**. Ask me any questions about this document.`;
-    if (reportId) return `Hi 👋 I'm the Audit Planning Agent. Your report for **${getReportName(selectedReport)}** is ready.`;
+    if (reportId) return `Hi 👋 I'm the ${agentLabel}. Your report for **${getReportName(selectedReport)}** is ready.`;
     return "Hi 👋 Upload or select a financial statement to get started.";
   }
 
@@ -493,7 +499,7 @@ function Chatbot({
     setMessages([
       {
         role:    "assistant",
-        content: `Hi 👋 Here is the generated audit plan for **${getReportName(selectedReport)}**.`,
+        content: `Hi 👋 Here is the generated report for **${getReportName(selectedReport)}**.`,
       },
       {
         role:          "assistant",
@@ -508,6 +514,7 @@ function Chatbot({
   useEffect(() => {
     preShownRef.current = false;
     sendOnceRef.current = false;
+    wasGeneratingRef.current = false;
     setLoading(false);
     setLoadingLabel("");
     setSessionId(createSessionId());
@@ -525,24 +532,24 @@ function Chatbot({
 
     if (preGeneratedReport) {
       preShownRef.current = true;
-      setMessages([{ role: "assistant", content: `Hi 👋 Here is the generated audit plan for **${getReportName(selectedReport)}**.` }]);
+      setMessages([{ role: "assistant", content: `Hi 👋 Here is the generated report for **${getReportName(selectedReport)}**.` }]);
       setTimeout(() => processAndShowReport(preGeneratedReport), 200);
       return;
     }
 
     if (preGenerating) {
-      setMessages([{ role: "assistant", content: `Hi 👋 Your audit plan for **${getReportName(selectedReport)}** is being prepared — please wait...` }]);
+      setMessages([{ role: "assistant", content: `Hi 👋 Your report for **${getReportName(selectedReport)}** is being prepared — please wait...` }]);
       setLoading(true);
-      setLoadingLabel("Your audit plan is being prepared — please wait…");
+      setLoadingLabel("Your report is being prepared — please wait…");
       return;
     }
 
-    setMessages([{ role: "assistant", content: `Hi 👋 Generating your audit plan for **${getReportName(selectedReport)}**...` }]);
+    setMessages([{ role: "assistant", content: `Hi 👋 Generating your report for **${getReportName(selectedReport)}**...` }]);
     if (!sendOnceRef.current) {
       sendOnceRef.current = true;
-      setTimeout(() => sendMessage("Generate audit planning."), 300);
+      setTimeout(() => sendMessage(generateMessage), 300);
     }
-  }, [reportId, generalMode, managerMode]);
+  }, [reportId, generalMode, managerMode, agentId]);
 
   // ── Pre-generated report arrives after agent opened ──────────────────
   useEffect(() => {
@@ -560,10 +567,21 @@ function Chatbot({
     if (generalMode || managerMode) return;
     if (preShownRef.current) return;
     if (preGenerating) {
+      wasGeneratingRef.current = true;
       setLoading(true);
-      setLoadingLabel("Your audit plan is being prepared — please wait…");
+      setLoadingLabel("Your report is being prepared — please wait…");
+      return;
     }
-  }, [preGenerating]);
+
+    if (wasGeneratingRef.current && !preGeneratedReport && !preShownRef.current) {
+      wasGeneratingRef.current = false;
+      if (!sendOnceRef.current) {
+        sendOnceRef.current = true;
+        setLoadingLabel("Taking longer than expected — retrying…");
+        sendMessage(generateMessage);
+      }
+    }
+  }, [preGenerating, preGeneratedReport]);
 
   async function pollJobStatus(jobId) {
     for (let attempt = 0; attempt < MAX_POLL_ATTEMPTS; attempt++) {
@@ -604,8 +622,9 @@ function Chatbot({
           question:      q,
           sessionId,
           reportId:      generalMode ? null : reportId,
-          selectedAgent: generalMode ? "general_kb_agent" : "audit_planning_agent",
-          agent:         generalMode ? "general_kb_agent" : "audit_planning_agent",
+          reportIds:     generalMode ? [] : (Array.isArray(reportIds) && reportIds.length ? reportIds : (reportId ? [reportId] : [])),
+          selectedAgent: generalMode ? "general_kb_agent" : agentId,
+          agent:         generalMode ? "general_kb_agent" : agentId,
           generalMode:   generalMode  || false,
           general_mode:  generalMode  || false,
           managerMode:   managerMode  || false,
@@ -655,14 +674,16 @@ function Chatbot({
   }, [messages, loading]);
 
   return (
-    <section className="chatbot-card">
+    <section className={generalMode ? "chatbot-card chatbot-card-general" : "chatbot-card"}>
       {modalItem && <ItemModal item={modalItem} onClose={() => setModalItem(null)} />}
 
       <div className="chatbot-messages">
         {messages.map((msg, i) => (
           <div key={`${msg.role}-${i}`}
             className={msg.role === "user" ? "chat-message-row user-row" : "chat-message-row assistant-row"}>
-            <div className="message-avatar">{msg.role === "user" ? "You" : "AI"}</div>
+            <div className="message-avatar">
+              {msg.role === "user" ? "You" : <img src="/ai-assistant-avatar.png" alt="AI" className="ai-avatar-img" />}
+            </div>
             <div className={msg.role === "user" ? "chat-message user-message" : "chat-message assistant-message"}>
               <ReactMarkdown remarkPlugins={[remarkGfm]}
                 components={buildComponents(msg.isAuditReport, msg.riskData, (item) => setModalItem(item))}>
@@ -680,9 +701,11 @@ function Chatbot({
 
         {loading && (
           <div className="chat-message-row assistant-row">
-            <div className="message-avatar">AI</div>
-            <div className="chat-message assistant-message">
-              {loadingLabel || "Thinking..."}
+            <div className="message-avatar"><img src="/ai-assistant-avatar.png" alt="AI" className="ai-avatar-img" /></div>
+            <div className="loading-message">
+              <span className="typing-dots" aria-label="AI is thinking">
+                <span></span><span></span><span></span>
+              </span>
             </div>
           </div>
         )}
@@ -698,7 +721,7 @@ function Chatbot({
           placeholder={
             generalMode ? "Ask about UAE Corporate Tax, VAT, IFRS, audit standards..." :
             managerMode ? `Ask a question about ${getReportName(selectedReport)}...` :
-            reportId    ? "Ask a follow-up question about the audit plan..." :
+            reportId    ? "Ask a follow-up question about the report..." :
                           "Upload or select a report first..."
           }
           rows={2}

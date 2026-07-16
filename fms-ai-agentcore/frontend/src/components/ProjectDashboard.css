@@ -1,0 +1,260 @@
+.pdb-view {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 24px 32px 60px;
+  max-width: 1000px;
+  margin: 0 auto;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.pdb-header { margin-bottom: 18px; }
+
+.pdb-title {
+  font-size: 20px;
+  font-weight: 800;
+  color: var(--text-primary);
+}
+
+.pdb-subtitle {
+  font-size: 13px;
+  color: var(--text-muted);
+  font-weight: 600;
+  margin-top: 2px;
+}
+
+.pdb-empty-banner {
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  color: #1e40af;
+  border-radius: var(--radius-md);
+  padding: 12px 16px;
+  font-size: 13px;
+  line-height: 1.5;
+  margin-bottom: 20px;
+}
+
+.pdb-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+}
+
+.pdb-card {
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 18px 20px;
+  box-shadow: var(--shadow-sm);
+}
+
+.pdb-card-wide { grid-column: 1 / -1; }
+
+.pdb-card-label {
+  font-size: 12.5px;
+  font-weight: 800;
+  color: var(--text-primary);
+  margin-bottom: 10px;
+}
+
+.pdb-card-text {
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.pdb-card-empty {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-muted);
+  margin: 0;
+}
+
+.pdb-card-hint {
+  font-size: 11px;
+  color: #94a3b8;
+  margin: 8px 0 0;
+}
+
+.pdb-metric-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.pdb-metric-value {
+  font-size: 28px;
+  font-weight: 800;
+  color: var(--at-blue);
+}
+
+.pdb-edit-btn {
+  border: none;
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.pdb-edit-btn:hover { background: #eef2f7; color: var(--text-primary); }
+
+.pdb-bar-track {
+  height: 8px;
+  border-radius: 999px;
+  background: #eef1f5;
+  overflow: hidden;
+}
+
+.pdb-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.3s ease;
+}
+
+.pdb-edit-row {
+  display: flex;
+  gap: 8px;
+}
+
+.pdb-edit-row input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.pdb-save-btn {
+  border: none;
+  background: var(--at-blue);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 8px 16px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.pdb-save-btn:hover:not(:disabled) { background: var(--at-blue-mid); }
+.pdb-save-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Outstanding Issues */
+.pdb-issue-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.pdb-issue-list li {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.pdb-risk-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  margin-top: 5px;
+  flex-shrink: 0;
+}
+
+.pdb-issue-area { font-size: 13.5px; font-weight: 700; color: var(--text-primary); }
+.pdb-issue-response { font-size: 12.5px; color: var(--text-muted); margin-top: 2px; line-height: 1.5; }
+
+/* Risk Rankings */
+.pdb-risk-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.pdb-risk-list li {
+  display: grid;
+  grid-template-columns: minmax(120px, 200px) 1fr auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.pdb-risk-area {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pdb-risk-bar-track {
+  height: 8px;
+  border-radius: 999px;
+  background: #eef1f5;
+  overflow: hidden;
+}
+
+.pdb-risk-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+}
+
+.pdb-risk-badge {
+  font-size: 10px;
+  font-weight: 800;
+  color: #fff;
+  padding: 3px 9px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+/* Review Notes */
+.pdb-note-input-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.pdb-note-input-row textarea {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+  resize: vertical;
+}
+
+.pdb-notes-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pdb-notes-list li {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.pdb-note-text { font-size: 13px; color: var(--text-primary); line-height: 1.5; }
+.pdb-note-time { font-size: 11px; color: var(--text-muted); margin-top: 3px; }
+
+@media (max-width: 640px) {
+  .pdb-view { padding: 18px; }
+  .pdb-risk-list li { grid-template-columns: 1fr; gap: 6px; }
+}
