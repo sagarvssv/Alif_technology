@@ -15,6 +15,23 @@ OUTPUT_BUCKET = os.environ.get("OUTPUT_BUCKET")
 
 table = dynamodb.Table(TABLE_NAME)
 
+# Fields that can be large (extracted document text, full markdown reports).
+# These are stripped out of LIST responses (GET /documents) to keep the
+# payload small and fast for polling, but are still returned in full when
+# fetching a SINGLE document by id (GET /documents/{id}) via
+# get_document_by_id(), since that's the only place that content is needed.
+HEAVY_FIELDS = [
+    "extractedText",
+    "extracted_text",
+    "documentText",
+    "document_text",
+    "reportMarkdown",
+    "report_markdown",
+    "markdown",
+    "sourceTextPreview",
+    "source_text_preview",
+]
+
 
 def response(status_code, body):
     return {
@@ -83,24 +100,15 @@ def normalize_item(item):
 
 
 def strip_heavy_fields(item):
-    """Remove large text fields from list responses. A Lambda response
-    payload has a hard 6MB ceiling — attaching full extracted text/markdown
-    to every document in the list (instead of just the one being viewed)
-    blew straight past that once more than a couple of documents piled up,
-    causing a 413 on every single request, list included. The frontend's
-    matching/polling logic only ever needs name + status + id from this
-    list endpoint; full content is fetched separately per-document via
-    get_document_by_id() when actually needed."""
+    """Return a shallow copy of item with large text fields removed.
+    Used for list responses only — full content is still available via
+    the single-document GET endpoint."""
     if not item:
         return item
-    light = dict(item)
-    for field in [
-        "extractedText", "extracted_text",
-        "documentText", "document_text",
-        "reportMarkdown", "report_markdown", "markdown",
-    ]:
-        light.pop(field, None)
-    return light
+    trimmed = dict(item)
+    for field in HEAVY_FIELDS:
+        trimmed.pop(field, None)
+    return trimmed
 
 
 def read_report_markdown(item):
@@ -175,6 +183,18 @@ def handler(event, context):
             or query_parameters.get("reportId")
         )
 
+        # NOTE: "portal" is read but intentionally no longer used to decide
+        # how MUCH of the list to return. It used to trigger a special case
+        # that threw away everything except the single newest document,
+        # which meant the frontend's upload-completion polling could NEVER
+        # see a newly finished document once any other document existed —
+        # it would spin forever ("stuck at 95%") no matter how long you
+        # waited, because that one document was never the "latest" one.
+        # All callers now get the FULL sorted list; only the heavy text
+        # fields are stripped out (see strip_heavy_fields) to keep the
+        # response small and fast.
+        portal = query_parameters.get("portal", "user")
+
         if document_id:
             item = get_document_by_id(document_id)
 
@@ -202,17 +222,12 @@ def handler(event, context):
             reverse=True
         )
 
-        # Return every document (not just the newest one — that was the
-        # original bug), but keep each entry LIGHT: no full extracted
-        # text/markdown attached. That heavy content is only fetched for
-        # ONE document at a time, via the document_id branch above, when
-        # the frontend actually needs to read a specific report's content.
-        light_reports = [strip_heavy_fields(r) for r in normalized_reports]
+        lightweight_reports = [strip_heavy_fields(item) for item in normalized_reports]
 
         return response(
             200,
             {
-                "reports": light_reports
+                "reports": lightweight_reports
             }
         )
 
