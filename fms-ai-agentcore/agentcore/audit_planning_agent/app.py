@@ -124,7 +124,7 @@ def run_agent(payload):
 
     user_message = original_user_message or "Generate audit planning."
 
-    # ── GENERAL Q&A MODE ─────────────────────────────────────────────────
+    # ── GENERAL Q&A MODE ─────────────────────────────────────────────
     if general_mode or not report_ids:
         kb_context, citations = retrieve_from_kb(user_message, number_of_results=6)
         answer = answer_general_question(
@@ -139,13 +139,13 @@ def run_agent(payload):
             extra={"agentType": "general", "agentName": "General Q&A Agent"},
         )
 
-    # ── Load document context (one or many uploaded files, combined) ──────
+    # ── Load document context (one or many uploaded files, combined) ──
     report_context  = get_combined_report_context(report_ids=report_ids, direct_context=direct_context)
     # Multiple documents need more room than a single one before truncating.
     max_context_chars = 18000 * min(len(report_ids), 3)
     context_summary = build_context_summary(compact_text(report_context, max_chars=max_context_chars))
 
-    # ── ROUTE ─────────────────────────────────────────────────────────────
+    # ── ROUTE ─────────────────────────────────────────────────────────
     if is_generate_request(user_message):
         # Full audit planning report generation
         kb_query = build_kb_query(user_message, report_context, compact_text)
@@ -230,11 +230,11 @@ Answer the question directly and concisely.
         return f"Unable to retrieve an answer at this time. Error: {str(exc)}"
 
 
-# ── Follow-up question about uploaded document ───────────────────────
-def answer_document_question(invoke_claude, user_message, report_context, kb_context):
+# ── Follow-up question about uploaded document ────────────────────────
+def answer_document_question(invoke_claude, user_message, report_context,kb_context):
     system_prompt = """
 You are an expert audit and financial analyst assistant.
-The user has an uploaded financial document and has already seen the full audit plan.
+The user has an uploaded financial document and has already seen the fullaudit plan.
 They are now asking a specific follow-up question about it.
 
 STRICT RULES:
@@ -271,7 +271,7 @@ Do NOT generate a full audit plan. Give a focused, helpful answer.
         return f"Unable to answer this question. Error: {str(exc)}"
 
 
-# ── Risk improvement plan ─────────────────────────────────────────────
+# ── Risk improvement plan ──────────────────────────────────────────────
 def generate_risk_improvement_plan(
     invoke_claude, user_message, risk_area, report_context, kb_context
 ):
@@ -290,7 +290,7 @@ FORMAT RULES:
 - Do NOT regenerate the full audit plan.
 - Focus ONLY on the specific risk area asked about.
 """
-    area_label = risk_area.title() if risk_area else "the identified risk area"
+    area_label = risk_area.title() if risk_area else "the identified riskarea"
     user_prompt = f"""
 Document financial data:
 {report_context or "No document context available."}
@@ -315,7 +315,7 @@ Numbered list of specific steps management must take to reduce this risk.
 Use actual document figures where relevant (AED amounts, percentages, dates).
 
 ### ✅ How the Auditor Will Verify Improvement
-Numbered list of what the auditor will check to confirm the risk has been reduced.
+Numbered list of what the auditor will check to confirm the risk has beenreduced.
 
 ### 📊 Expected Outcome
 Brief statement on what risk level this area should reach after improvements are implemented.
@@ -356,6 +356,12 @@ LANGUAGE RULES:
 - Maximum 5 bullets per section.
 - Use actual numbers from the document (e.g. AED 3,100,000).
 - If data is missing, write: Not available.
+- NEVER state a specific risk level (High/Medium/Low) for any topic
+  that has zero supporting evidence in the document. If a standard
+  risk area cannot be evaluated from what was provided, say so
+  explicitly (e.g. "To Be Assessed") instead of guessing. Always use
+  that exact phrase, not "N/A" or other wording, so it is handled
+  consistently everywhere it appears in the report.
 
 FORMAT RULES:
 - Use markdown tables where requested.
@@ -407,16 +413,50 @@ Show this table exactly:
 Use simple plain English in "What it means simply" — one short sentence.
 Maximum 8 rows.
 
+CRITICAL — do not invent risk findings:
+- Only mark a Risk Area as "High", "Medium", or "Low" if the document
+  actually contains numbers, statements, or evidence supporting that
+  conclusion (e.g. inventory figures, receivables ageing, revenue
+  entries, related party transactions).
+- If the document does NOT contain any information about a standard
+  risk area (inventory, trade receivables, revenue cutoff, related
+  parties, going concern, tax/VAT), do NOT assign it a High or Medium
+  risk level. Instead set Risk Level to exactly: To Be Assessed
+  and explain in "What the auditor will check" that this requires
+  the underlying financial statements, which were not provided.
+- Never fabricate a specific risk percentage or level for a topic the
+  document does not mention. Absence of data is not evidence of risk.
+- If the uploaded document is not a financial statement (e.g. a tax
+  payment receipt, invoice, or single-transaction record), most or all
+  rows should be "To Be Assessed", plus 1-2 rows genuinely derived
+  from what the document DOES show.
+- Always use the exact phrase "To Be Assessed" — never "N/A", "Not
+  applicable", or any other wording — so it is handled consistently.
+
 # Audit Programs
 For each area, write 3 short bullets only. Areas: Inventory, Revenue,
 Trade Receivables, Related Parties, Tax/VAT, Going Concern, Disclosures.
 Keep each bullet under 12 words.
+If the document provides no evidence for a given area, say the
+procedures below are standard/default steps pending receipt of the
+relevant financial records, rather than presenting them as findings.
 
 # Staffing Recommendations
 A simple table:
 | Role | Main Job | Hours |
 Show: Partner, Manager, Senior, Assistant, Tax Specialist.
 Then one line: Total estimated hours: [X]
+
+# Overall Audit Planning Summary
+Write one short paragraph (3-4 sentences). Cover:
+- What document was actually reviewed (name the client and what the
+  document is, e.g. a tax payment slip vs full financial statements).
+- Whether meaningful risk levels could be assessed, or whether most
+  areas are "To Be Assessed" because financial statements were not
+  provided — say this plainly if it is the case.
+- The single most important next step (usually: obtain full financial
+  statements from management before further audit work can proceed).
+Do not repeat the tables above. Write this as plain narrative text.
 
 Do not write anything after the last section.
 """
@@ -429,6 +469,7 @@ SECTION_HEADINGS = [
     "Risk Assessment",
     "Audit Programs",
     "Staffing Recommendations",
+    "Overall Audit Planning Summary",
 ]
 
 

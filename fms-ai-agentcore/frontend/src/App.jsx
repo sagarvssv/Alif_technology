@@ -77,6 +77,62 @@ function getLegalName(project) {
   return project?.legalName || project?.companyAuditName || "";
 }
 
+function formatTimeOnly(value) {
+  if (!value) return "";
+  try {
+    return new Intl.DateTimeFormat("en-IN", { timeStyle: "short" }).format(new Date(value));
+  } catch { return value; }
+}
+
+function isSameDay(a, b) {
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+}
+
+function historyDateLabel(dateObj) {
+  const today = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(today.getDate() - 1);
+
+  if (isSameDay(dateObj, today)) return "Today";
+  if (isSameDay(dateObj, yesterday)) return "Yesterday";
+  return new Intl.DateTimeFormat("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" }).format(dateObj);
+}
+
+// Groups history entries by calendar day (newest first), matching the
+// familiar browser-history layout: a date heading, then a simple
+// line-by-line list of entries underneath it (time · dot · description),
+// rather than one large repeating card per entry.
+function groupHistoryByDate(history) {
+  const sorted = [...(history || [])].sort(
+    (a, b) => new Date(b.timestamp || 0) - new Date(a.timestamp || 0)
+  );
+
+  const groups = [];
+  for (const entry of sorted) {
+    const entryDate = new Date(entry.timestamp || 0);
+    const lastGroup = groups[groups.length - 1];
+    if (lastGroup && isSameDay(lastGroup.dateObj, entryDate)) {
+      lastGroup.entries.push(entry);
+    } else {
+      groups.push({ dateObj: entryDate, label: historyDateLabel(entryDate), entries: [entry] });
+    }
+  }
+  return groups;
+}
+
+// Human-readable label for a history entry's action type — used in the
+// details view opened when a line is clicked.
+function historyActionLabel(action = "") {
+  const labels = {
+    created:         "Project Created",
+    file_uploaded:   "Document Uploaded",
+    file_deleted:    "Document Deleted",
+    agent_generated: "Agent Report Generated",
+    updated:         "Project Updated",
+  };
+  return labels[action] || (action ? action.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()) : "Activity");
+}
+
 function formatFileSize(bytes) {
   if (!bytes && bytes !== 0) return "—";
   if (bytes < 1024) return `${bytes} B`;
@@ -133,6 +189,19 @@ function countRiskLevels(markdown = "") {
   return { high, medium, low, total: high + medium + low };
 }
 
+// Master Agent overview cards render extracted summary text as plain text,
+// not through a Markdown renderer — so any **bold** or *italic* markers the
+// agent includes would otherwise show up as literal asterisks/underscores
+// instead of being styled. Stripping them here keeps this specific card
+// clean regardless of what formatting any agent's prompt happens to use.
+function stripMarkdownEmphasis(text = "") {
+  return text
+    .replace(/\*\*(.+?)\*\*/g, "$1")
+    .replace(/__(.+?)__/g, "$1")
+    .replace(/\*(.+?)\*/g, "$1")
+    .replace(/_(.+?)_/g, "$1");
+}
+
 function extractSection(markdown = "", heading = "") {
   if (!markdown) return "";
   const lines = markdown.split("\n");
@@ -153,7 +222,7 @@ function extractSection(markdown = "", heading = "") {
       if (line.trim()) collected.push(line.trim());
     }
   }
-  return collected.join(" ").trim();
+  return stripMarkdownEmphasis(collected.join(" ").trim());
 }
 
 // ─── Progress Bar ─────────────────────────────────────────────────────
@@ -270,6 +339,38 @@ function FinancialIcon() {
   );
 }
 
+// ─── History Entry Detail Modal ────────────────────────────────────────
+// Opened by clicking any line in the Project History list. Shows the full
+// note text, a human-readable action type, and the exact date/time —
+// everything currently tracked for a history entry.
+function HistoryDetailModal({ entry, onClose }) {
+  if (!entry) return null;
+  return (
+    <div className="project-modal-overlay" onClick={onClose}>
+      <div className="project-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="project-modal-header">
+          <h3>{historyActionLabel(entry.action)}</h3>
+          <button onClick={onClose}>✕</button>
+        </div>
+        <div className="project-modal-body">
+          <div className="project-modal-row">
+            <span className="project-modal-label">Description</span>
+            <span>{entry.note || entry.action || "No further details recorded."}</span>
+          </div>
+          <div className="project-modal-row">
+            <span className="project-modal-label">Date &amp; Time</span>
+            <span>{formatDate(entry.timestamp)}</span>
+          </div>
+          <div className="project-modal-row">
+            <span className="project-modal-label">Action Type</span>
+            <span>{entry.action || "—"}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Master Agent Overview ─────────────────────────────────────────────
 function MasterAgentOverview({ agentReports, reportName, onViewDetails }) {
   const cards = [
@@ -382,6 +483,7 @@ function App() {
   const [agentReportsByDoc,  setAgentReportsByDoc]  = useState({});
   // Which uploaded files currently have their sidebar dropdown expanded.
   const [expandedFileIds,    setExpandedFileIds]    = useState(() => new Set());
+  const [historyDetailItem, setHistoryDetailItem]   = useState(null);
   const [qaPopupOpen,        setQaPopupOpen]        = useState(false);
   const [selectedProjectItem, setSelectedProjectItem] = useState(null);
   const [activeProjectAgent, setActiveProjectAgent]   = useState(null);
@@ -865,8 +967,22 @@ function App() {
 
     setSelectedReport(first);
     setSelectedReportId(firstId);
+    // Update the ref immediately, not just the state. React only re-runs
+    // the effect that normally keeps this ref in sync AFTER this render
+    // commits — but generateAgentReportInBackground() below fires its
+    // "preGenerating: true" flag synchronously, in this same tick. Without
+    // this line, that flag would be written to the per-document cache
+    // correctly but never mirrored into the live sidebar state, so the
+    // "Preparing" pill would never appear (only "Ready" later, once a
+    // real network delay has given the effect time to catch up).
+    selectedReportIdRef.current = firstId;
     setAgentReports(emptyAgentReportState());
-    if (!project) navigateTo(VIEW_UPLOAD);
+    // For User Portal (no project), stay exactly where the user is
+    // (the Home screen) rather than auto-navigating anywhere. The
+    // sidebar's "Your Document" section now shows Master Agent / Audit
+    // Planning / FS Review with live status as soon as selectedReportId
+    // is set above — agents are reached by clicking those sidebar links,
+    // never pushed into the middle of the screen automatically.
 
     docs.forEach((d) => {
       const id = getReportId(d);
@@ -961,6 +1077,11 @@ function App() {
     const reportId = file.reportId;
 
     setSelectedReportId(reportId);
+    // See the matching comment in finalizeBatchUpload — the ref must be
+    // updated immediately (not just the state) so that generateAgentReportInBackground's
+    // synchronous "preGenerating: true" flag below correctly mirrors into
+    // the live agentReports state instead of being silently dropped.
+    selectedReportIdRef.current = reportId;
     setSelectedReport(null);
 
     const cachedInMemory = agentReportsByDoc[reportId];
@@ -1166,23 +1287,11 @@ function App() {
           <button className="sidebar-toggle" onClick={() => setSidebarOpen((o) => !o)}>◀</button>
         </div>
 
-        {portal !== "audit" && (
+        {portal === "manager" && (
           <button className="new-chat-btn" onClick={startNewChat}>
             <span className="new-chat-icon">＋</span>
             <span className="new-chat-label">New Chat</span>
           </button>
-        )}
-
-        {portal === "user" && (
-          <label className="sidebar-upload-btn">
-            <input ref={sidebarFileRef} type="file" multiple
-              accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg"
-              onChange={handleMultiUpload} disabled={uploading || processing} />
-            <span className="sidebar-upload-icon">➕</span>
-            <span className="sidebar-upload-label">
-              {uploading ? "Uploading…" : processing ? "Processing…" : "Upload Document(s)"}
-            </span>
-          </label>
         )}
 
         <button
@@ -1192,6 +1301,63 @@ function App() {
           <span className="sidebar-projects-icon">📁</span>
           <span className="sidebar-projects-label">Projects</span>
         </button>
+
+        {/* ── User Portal: current document's agents ──────────────────
+            Once a document is uploaded (no project involved), this shows
+            Master Agent / Audit Planning Agent / Financial Statement
+            Review Agent directly in the sidebar with live Preparing/Ready
+            status — replacing the old separate "Report Analysis" picker
+            screen that used to show these same three options in the main
+            content area. */}
+        {portal === "user" && selectedReportId && (
+          <div className="sidebar-section sidebar-project-agents">
+            <div className="sidebar-section-title">Your Document</div>
+
+            <button
+              className={`sidebar-agent-btn ${view === VIEW_MASTER_AGENT ? "sidebar-agent-active" : ""}`}
+              onClick={() => navigateTo(VIEW_MASTER_AGENT)}
+            >
+              <span className="sidebar-agent-icon">🧠</span>
+              <span className="sidebar-agent-label">Master Agent</span>
+              {(agentReports.audit_planning_agent?.preGenerating || agentReports.fs_review_agent?.preGenerating) && (
+                <span className="sidebar-agent-status status-generating">Preparing</span>
+              )}
+              {!(agentReports.audit_planning_agent?.preGenerating || agentReports.fs_review_agent?.preGenerating) &&
+                agentReports.audit_planning_agent?.preGenerated && agentReports.fs_review_agent?.preGenerated && (
+                <span className="sidebar-agent-status status-ready">Ready</span>
+              )}
+            </button>
+
+            {SUB_AGENTS.map((agent) => (
+              <button
+                key={agent.id}
+                className={`sidebar-agent-btn ${selectedAgent?.id === agent.id && view === VIEW_AGENT ? "sidebar-agent-active" : ""} ${!agent.available ? "sidebar-agent-disabled" : ""}`}
+                disabled={!agent.available}
+                onClick={() => {
+                  if (!agent.available) return;
+                  setSelectedAgent(agent);
+                  updateAgentReport(agent.id, { content: "" });
+                  navigateTo(VIEW_AGENT);
+                }}
+              >
+                <span className="sidebar-agent-icon">{agent.icon}</span>
+                <span className="sidebar-agent-label">{agent.label}</span>
+                {agent.available ? (
+                  <>
+                    {agentReports[agent.id]?.preGenerating && (
+                      <span className="sidebar-agent-status status-generating">Preparing</span>
+                    )}
+                    {!agentReports[agent.id]?.preGenerating && agentReports[agent.id]?.preGenerated && (
+                      <span className="sidebar-agent-status status-ready">Ready</span>
+                    )}
+                  </>
+                ) : (
+                  <span className="sidebar-agent-status status-soon">Soon</span>
+                )}
+              </button>
+            ))}
+          </div>
+        )}
 
         {portal === "audit" && selectedProjectItem && (
           <div className="sidebar-section sidebar-project-agents">
@@ -1343,7 +1509,6 @@ function App() {
             <div className="topbar-title">
               {view === VIEW_HOME         && "Welcome — What would you like to do?"}
               {view === VIEW_MANAGER_HOME && "Manager Portal — Select a Document"}
-              {view === VIEW_UPLOAD       && "Report Analysis"}
               {view === VIEW_AGENT        && (selectedAgent?.label || "Audit Planning Agent")}
               {view === VIEW_MANAGER_CHAT && `Document Q&A — ${getReportName(selectedReport)}`}
               {view === VIEW_PROJECTS     && "Projects"}
@@ -1456,58 +1621,6 @@ function App() {
           </div>
         )}
 
-        {/* REPORT ANALYSIS — agent picker */}
-        {view === VIEW_UPLOAD && (
-          <div className="agent-view">
-            <button className="back-nav-btn"
-              style={{ alignSelf: "flex-start", margin: "16px" }}
-              onClick={() => goBack(VIEW_HOME)}>
-              ← Back
-            </button>
-
-            {/* Master agent card with financial icon */}
-            <div className="master-agent-card">
-              <div className="master-badge">MASTER AGENT</div>
-
-              {/* Financial chart icon instead of robot */}
-              <FinancialIcon />
-
-              <div className="master-title">FMS AI AgentCore</div>
-              <div className="master-desc">
-                Your document has been processed. Select an agent below to view
-                the generated report instantly.
-              </div>
-              {selectedReport && (
-                <div className="master-doc-pill">📑 {getReportName(selectedReport)}</div>
-              )}
-            </div>
-
-            <div className="sub-agents-label">Report Analysis</div>
-
-            <div className="sub-agents-grid">
-              {SUB_AGENTS.map((agent) => (
-                <button key={agent.id}
-                  className={`sub-agent-card ${!agent.available ? "sub-agent-disabled" : ""}`}
-                  onClick={() => openAgent(agent)}
-                  disabled={!agent.available}>
-                  <div className="sub-agent-icon">{agent.icon}</div>
-                  <div className="sub-agent-body">
-                    <div className="sub-agent-name">{agent.label}</div>
-                    <div className="sub-agent-desc">{agent.description}</div>
-                  </div>
-                </button>
-              ))}
-            </div>
-
-            <label className="upload-another-btn">
-              <input ref={fileInputRef} type="file" multiple
-                accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg"
-                onChange={handleMultiUpload} disabled={uploading || processing} />
-              {uploading ? "Uploading…" : processing ? "Processing…" : "➕ Upload Document(s)"}
-            </label>
-          </div>
-        )}
-
         {/* MASTER AGENT */}
         {view === VIEW_MASTER_AGENT && (
           <div className="chatbot-view">
@@ -1543,8 +1656,8 @@ function App() {
           <div className="chatbot-view">
             <div className="chatbot-nav-bar">
               <button className="back-nav-btn"
-                onClick={() => goBack(selectedProjectItem ? VIEW_PROJECT_DETAIL : VIEW_UPLOAD)}>
-                {selectedProjectItem ? "← Back to Project" : "← Back to Report Analysis"}
+                onClick={() => goBack(selectedProjectItem ? VIEW_PROJECT_DETAIL : VIEW_MASTER_AGENT)}>
+                {selectedProjectItem ? "← Back to Project" : "← Back to Master Agent"}
               </button>
             </div>
             <Chatbot
@@ -1594,6 +1707,10 @@ function App() {
                   const latestId = files[0].reportId;
                   const cached   = restored[latestId];
                   setSelectedReportId(latestId);
+                  // Same fix as finalizeBatchUpload/openDocumentAgent — keep
+                  // the ref in sync immediately so a fresh generation kicked
+                  // off just below (when !cached) correctly shows "Preparing".
+                  selectedReportIdRef.current = latestId;
                   setAgentReports(cached || emptyAgentReportState());
 
                   const cachedReport = cachesByDoc[latestId]?.report;
@@ -1706,6 +1823,9 @@ function App() {
         {/* PROJECT HISTORY */}
         {view === VIEW_PROJECT_HISTORY && selectedProjectItem && (
           <div className="chatbot-view">
+            {historyDetailItem && (
+              <HistoryDetailModal entry={historyDetailItem} onClose={() => setHistoryDetailItem(null)} />
+            )}
             <div className="chatbot-nav-bar chatbot-nav-bar-split">
               <button className="back-nav-btn" onClick={() => goBack(VIEW_PROJECT_DETAIL)}>
                 ← Back to Project
@@ -1719,50 +1839,39 @@ function App() {
             </div>
 
             <div className="pd-view">
-              <div className="pd-card">
-                <div className="pd-card-header">
-                  <div className="pd-hero-icon">📄</div>
-                  <div className="pd-hero-text">
-                    <div className="pd-hero-eyebrow">Project Overview</div>
-                    <div className="pd-hero-name">{selectedProjectItem.projectName}</div>
-                    <div className="pd-hero-audit">
-                      <span className="pd-avatar">{getInitials(getLegalName(selectedProjectItem))}</span>
-                      <span className="pd-audit-sep">·</span>
-                      <span>{getLegalName(selectedProjectItem)}</span>
-                    </div>
-                  </div>
-                  <span className={`pd-status pd-status-${(selectedProjectItem.status || "active").toLowerCase()}`}>
-                    ● {selectedProjectItem.status || "Active"}
-                  </span>
-                </div>
-
-                <div className="pd-card-body">
-                  <ProjectDetailRows project={selectedProjectItem} />
-
-                  <div className="pd-meta">
-                    <span className="pd-meta-icon">🕒</span> Created {formatDate(selectedProjectItem.createdAt)}
-                  </div>
+              <div className="pf-header">
+                <div className="pf-title">Project History</div>
+                <div className="pf-subtitle">
+                  Every action performed on <strong>{selectedProjectItem.projectName}</strong>. Click any entry for details.
                 </div>
               </div>
 
-              <div className="pd-history-card">
-                <div className="pd-section-heading">Full History</div>
-                {Array.isArray(selectedProjectItem.history) && selectedProjectItem.history.length > 0 ? (
-                  <ul className="pd-timeline">
-                    {selectedProjectItem.history.map((h, i) => (
-                      <li key={i} className="pd-timeline-item">
-                        <span className="pd-timeline-dot" />
-                        <div>
-                          <div className="pd-timeline-action">{h.note || h.action}</div>
-                          <div className="pd-timeline-time">{formatDate(h.timestamp)}</div>
-                        </div>
-                      </li>
+              {Array.isArray(selectedProjectItem.history) && selectedProjectItem.history.length > 0 ? (
+                <div className="pd-history-card">
+                  <div className="chrome-history">
+                    {groupHistoryByDate(selectedProjectItem.history).map((group) => (
+                      <div className="chrome-history-group" key={group.dateObj.toISOString()}>
+                        <div className="chrome-history-date">{group.label}</div>
+                        <ul className="chrome-history-list">
+                          {group.entries.map((h, i) => (
+                            <li
+                              key={i}
+                              className="chrome-history-row chrome-history-row-clickable"
+                              onClick={() => setHistoryDetailItem(h)}
+                            >
+                              <span className="chrome-history-time">{formatTimeOnly(h.timestamp)}</span>
+                              <span className="chrome-history-dot" />
+                              <span className="chrome-history-text">{h.note || historyActionLabel(h.action)}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
                     ))}
-                  </ul>
-                ) : (
-                  <p className="pdb-card-empty">No history recorded yet.</p>
-                )}
-              </div>
+                  </div>
+                </div>
+              ) : (
+                <p className="pdb-card-empty">No history recorded yet.</p>
+              )}
             </div>
           </div>
         )}

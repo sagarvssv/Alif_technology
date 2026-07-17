@@ -84,6 +84,7 @@ def is_improve_request(message: str) -> bool:
 
 
 def extract_risk_area(message: str) -> str:
+    """Extract which risk area the user is asking about."""
     msg = message.lower()
     risk_areas = [
         "corporate tax", "vat", "inventory", "revenue", "receivables",
@@ -101,17 +102,17 @@ def run_agent(payload):
 
     from shared.bedrock import invoke_claude
     from shared.kb import retrieve_from_kb, format_citations
-    from shared.report_context import get_report_context, build_context_summary
+    from shared.report_context import get_combined_report_context, build_context_summary
     from shared.utils import (
         build_response,
         compact_text,
         get_direct_context_from_payload,
         get_message_from_payload,
-        get_report_id_from_payload,
+        get_report_ids_from_payload,
     )
 
     original_user_message = get_message_from_payload(payload)
-    report_id             = get_report_id_from_payload(payload)
+    report_ids             = get_report_ids_from_payload(payload)
     direct_context        = get_direct_context_from_payload(payload)
 
     general_mode = (
@@ -123,8 +124,8 @@ def run_agent(payload):
 
     user_message = original_user_message or "Generate audit planning."
 
-    # ── GENERAL Q&A MODE ─────────────────────────────────────────────────
-    if general_mode or not report_id:
+    # ── GENERAL Q&A MODE ─────────────────────────────────────────────
+    if general_mode or not report_ids:
         kb_context, citations = retrieve_from_kb(user_message, number_of_results=6)
         answer = answer_general_question(
             invoke_claude=invoke_claude,
@@ -138,12 +139,15 @@ def run_agent(payload):
             extra={"agentType": "general", "agentName": "General Q&A Agent"},
         )
 
-    # ── Load document context ─────────────────────────────────────────────
-    report_context  = get_report_context(report_id=report_id, direct_context=direct_context)
-    context_summary = build_context_summary(compact_text(report_context, max_chars=18000))
+    # ── Load document context (one or many uploaded files, combined) ──
+    report_context  = get_combined_report_context(report_ids=report_ids, direct_context=direct_context)
+    # Multiple documents need more room than a single one before truncating.
+    max_context_chars = 18000 * min(len(report_ids), 3)
+    context_summary = build_context_summary(compact_text(report_context, max_chars=max_context_chars))
 
-    # ── ROUTE ─────────────────────────────────────────────────────────────
+    # ── ROUTE ─────────────────────────────────────────────────────────
     if is_generate_request(user_message):
+        # Full audit planning report generation
         kb_query = build_kb_query(user_message, report_context, compact_text)
         kb_context, citations = retrieve_from_kb(kb_query, number_of_results=6)
         citation_details = format_citations(citations)
@@ -157,10 +161,12 @@ def run_agent(payload):
         )
 
     elif is_improve_request(user_message):
+        # Risk improvement plan for a specific area
         risk_area = extract_risk_area(user_message)
         kb_context, citations = retrieve_from_kb(
             f"how to improve {risk_area} audit risk UAE IFRS ISA", number_of_results=6
         )
+
         answer = generate_risk_improvement_plan(
             invoke_claude=invoke_claude,
             user_message=user_message,
@@ -170,7 +176,9 @@ def run_agent(payload):
         )
 
     else:
+        # General follow-up question about the document
         kb_context, citations = retrieve_from_kb(user_message, number_of_results=5)
+
         answer = answer_document_question(
             invoke_claude=invoke_claude,
             user_message=user_message,
@@ -186,6 +194,7 @@ def run_agent(payload):
     )
 
 
+# ── General KB question (no document) ────────────────────────────────
 def answer_general_question(invoke_claude, user_message, kb_context):
     system_prompt = """
 You are a UAE financial and audit compliance expert assistant.
@@ -221,10 +230,11 @@ Answer the question directly and concisely.
         return f"Unable to retrieve an answer at this time. Error: {str(exc)}"
 
 
-def answer_document_question(invoke_claude, user_message, report_context, kb_context):
+# ── Follow-up question about uploaded document ────────────────────────
+def answer_document_question(invoke_claude, user_message, report_context,kb_context):
     system_prompt = """
 You are an expert audit and financial analyst assistant.
-The user has an uploaded financial document and has already seen the full audit plan.
+The user has an uploaded financial document and has already seen the fullaudit plan.
 They are now asking a specific follow-up question about it.
 
 STRICT RULES:
@@ -261,6 +271,7 @@ Do NOT generate a full audit plan. Give a focused, helpful answer.
         return f"Unable to answer this question. Error: {str(exc)}"
 
 
+# ── Risk improvement plan ──────────────────────────────────────────────
 def generate_risk_improvement_plan(
     invoke_claude, user_message, risk_area, report_context, kb_context
 ):
@@ -279,7 +290,7 @@ FORMAT RULES:
 - Do NOT regenerate the full audit plan.
 - Focus ONLY on the specific risk area asked about.
 """
-    area_label = risk_area.title() if risk_area else "the identified risk area"
+    area_label = risk_area.title() if risk_area else "the identified riskarea"
     user_prompt = f"""
 Document financial data:
 {report_context or "No document context available."}
@@ -304,7 +315,7 @@ Numbered list of specific steps management must take to reduce this risk.
 Use actual document figures where relevant (AED amounts, percentages, dates).
 
 ### ✅ How the Auditor Will Verify Improvement
-Numbered list of what the auditor will check to confirm the risk has been reduced.
+Numbered list of what the auditor will check to confirm the risk has beenreduced.
 
 ### 📊 Expected Outcome
 Brief statement on what risk level this area should reach after improvements are implemented.
@@ -335,17 +346,29 @@ def build_kb_query(user_message, report_context, compact_text):
 def base_system_prompt():
     return """
 You are a plain-English audit planning assistant. Write for a business owner or manager
-who is NOT an accountant.
+who is NOT an accountant. Follow these strict rules:
 
-STRICT RULES:
+LANGUAGE RULES:
 - Use simple, short sentences. Maximum 15 words per sentence.
-- Use actual numbers from the document (AED amounts).
-- If data is missing write: Not available.
-- Use markdown tables exactly as specified.
-- Use bullet points for lists.
-- Follow the template sections exactly, including the final summary section.
-- Do NOT change the risk levels assigned to you.
-- Output must be IDENTICAL every time for the same document.
+- No jargon without a plain explanation.
+- No long paragraphs. Use short bullet points only.
+- Each bullet must be one short sentence.
+- Maximum 5 bullets per section.
+- Use actual numbers from the document (e.g. AED 3,100,000).
+- If data is missing, write: Not available.
+- NEVER state a specific risk level (High/Medium/Low) for any topic
+  that has zero supporting evidence in the document. If a standard
+  risk area cannot be evaluated from what was provided, say so
+  explicitly (e.g. "To Be Assessed") instead of guessing. Always use
+  that exact phrase, not "N/A" or other wording, so it is handled
+  consistently everywhere it appears in the report.
+
+FORMAT RULES:
+- Use markdown tables where requested.
+- Use bullet points (- ) for lists.
+- Keep tables to maximum 5 rows.
+- Do NOT write long explanations.
+- Do NOT repeat information.
 """
 
 
@@ -357,76 +380,85 @@ Financial statement context:
 Knowledge Base:
 {kb_context or "None."}
 
-Generate a complete audit planning report using ONLY the data above.
-Follow ALL instructions EXACTLY. Do not add, remove, or change any section.
+Generate a SHORT, SIMPLE audit planning report. Write for a non-accountant.
+Use plain English. Short bullets only. No long paragraphs.
 
-Each section must use the exact heading shown. Separate sections with: ---
+Each section must start with the exact heading shown. Separate sections with: ---
 
 # Engagement Strategy
-Table format:
+A simple table:
 | Item | Detail |
-Rows: Client, What is audited, Reporting framework, Year-end date, Total assets, Revenue, Main risks.
-Use exact values from the document. Maximum 7 rows.
+Show: Who is the client, What will be audited, When, and the main risks.
+Maximum 6 rows.
 
 # Planning Memorandum
-Table format:
+A simple table:
 | Item | Detail |
-Rows: Audit goal, What is covered, Key risk areas, Year-end date, Who leads, Tax consideration.
+Show: Audit goal, What is covered, Key dates, Who does what.
 Maximum 6 rows.
 
 # Materiality Calculation
-Table format:
+Show this table exactly:
 | Benchmark | Amount (AED) | % Used | Materiality (AED) |
-ALWAYS include these exact 3 rows in this exact order:
-Row 1: Profit before tax | [value from doc] | 5% | [5% of value]
-Row 2: Revenue | [value from doc] | 0.5% | [0.5% of value]
-Row 3: Total assets | [value from doc] | 1% | [1% of value]
-Then:
-- Overall materiality: AED [lowest of the three]
-- Performance materiality: AED [75% of overall]
-- Trivial threshold: AED [5% of overall]
-- Why this benchmark was chosen: [one sentence about profit before tax]
+Use actual numbers from the document.
+Then show:
+- Overall materiality: AED [amount]
+- Performance materiality: AED [amount]
+- Trivial threshold: AED [amount]
+- Why this benchmark was chosen: [one sentence]
 
 # Risk Assessment
-CRITICAL: You MUST output EXACTLY these risk areas in EXACTLY this order with EXACTLY these risk levels every time.
-Do NOT change the order. Do NOT change the risk levels. Do NOT add or remove rows.
-
+Show this table exactly:
 | Risk Area | What it means simply | Risk Level | What the auditor will check |
-| Inventory valuation | Stock may be overvalued or unsellable | High | Count stock, check slow-moving items and NRV |
-| Trade receivables | Some customers may not pay | High | Review overdue balances and ECL allowance |
-| Revenue cutoff | Sales may be recorded in wrong period | High | Test December invoices and delivery notes |
-| Related party payable | Supplier linked to company needs scrutiny | High | Check approval, pricing, and disclosure |
-| Going concern | Business needs cash to keep running | Medium | Review cash forecast and receivables collection |
-| Inventory write-down | Write-down allowance may be insufficient | Medium | Compare allowance to slow-moving stock value |
-| Corporate tax | Tax calculation needs careful review | Medium | Check tax expense calculation and compliance |
-| VAT compliance | VAT filings must match revenue recorded | Medium | Reconcile VAT returns to reported revenue |
+Use simple plain English in "What it means simply" — one short sentence.
+Maximum 8 rows.
 
-Use the EXACT risk levels shown above (High or Medium). Never use Low for any of these areas.
-Replace the generic descriptions with actual AED numbers from the document where available.
+CRITICAL — do not invent risk findings:
+- Only mark a Risk Area as "High", "Medium", or "Low" if the document
+  actually contains numbers, statements, or evidence supporting that
+  conclusion (e.g. inventory figures, receivables ageing, revenue
+  entries, related party transactions).
+- If the document does NOT contain any information about a standard
+  risk area (inventory, trade receivables, revenue cutoff, related
+  parties, going concern, tax/VAT), do NOT assign it a High or Medium
+  risk level. Instead set Risk Level to exactly: To Be Assessed
+  and explain in "What the auditor will check" that this requires
+  the underlying financial statements, which were not provided.
+- Never fabricate a specific risk percentage or level for a topic the
+  document does not mention. Absence of data is not evidence of risk.
+- If the uploaded document is not a financial statement (e.g. a tax
+  payment receipt, invoice, or single-transaction record), most or all
+  rows should be "To Be Assessed", plus 1-2 rows genuinely derived
+  from what the document DOES show.
+- Always use the exact phrase "To Be Assessed" — never "N/A", "Not
+  applicable", or any other wording — so it is handled consistently.
 
 # Audit Programs
-For each area write exactly 3 short bullets. Areas in this order:
-Inventory, Revenue, Trade Receivables, Related Parties, Tax/VAT, Going Concern, Disclosures.
-Keep each bullet under 12 words. Use actual AED numbers where relevant.
+For each area, write 3 short bullets only. Areas: Inventory, Revenue,
+Trade Receivables, Related Parties, Tax/VAT, Going Concern, Disclosures.
+Keep each bullet under 12 words.
+If the document provides no evidence for a given area, say the
+procedures below are standard/default steps pending receipt of the
+relevant financial records, rather than presenting them as findings.
 
 # Staffing Recommendations
-Table format:
+A simple table:
 | Role | Main Job | Hours |
-ALWAYS use these exact roles in this exact order with these exact hours:
-| Partner | Review, sign-off, and quality control | 15 |
-| Manager | Plan and supervise fieldwork | 30 |
-| Senior | Lead testing on key risk areas | 50 |
-| Assistant | Support testing and documentation | 40 |
-| Tax Specialist | Review VAT and corporate tax compliance | 15 |
-Total estimated hours: 150
+Show: Partner, Manager, Senior, Assistant, Tax Specialist.
+Then one line: Total estimated hours: [X]
 
 # Overall Audit Planning Summary
-Write 3-4 short sentences in plain English summarising this engagement:
-what the entity does, its scale (use actual revenue/asset figures from the
-document), the overall materiality figure, and the top 1-2 risk areas that
-will get the most audit attention. This section MUST be present and complete.
+Write one short paragraph (3-4 sentences). Cover:
+- What document was actually reviewed (name the client and what the
+  document is, e.g. a tax payment slip vs full financial statements).
+- Whether meaningful risk levels could be assessed, or whether most
+  areas are "To Be Assessed" because financial statements were not
+  provided — say this plainly if it is the case.
+- The single most important next step (usually: obtain full financial
+  statements from management before further audit work can proceed).
+Do not repeat the tables above. Write this as plain narrative text.
 
-Do not write anything after the Overall Audit Planning Summary section.
+Do not write anything after the last section.
 """
 
 
@@ -463,7 +495,7 @@ def generate_complete_audit_planning_output(
                 kb_context=kb_context,
                 citation_details=citation_details,
             ),
-            max_tokens=3000,
+            max_tokens=2500,
             temperature=0,
         )
         answer = (result or "").strip()

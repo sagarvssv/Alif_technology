@@ -58,6 +58,42 @@ def get_report_context(report_id=None, direct_context=None):
         return ""
 
 
+def get_combined_report_context(report_ids=None, direct_context=None):
+    """
+    Multi-document version of get_report_context. Fetches each report_id's
+    context individually and concatenates them with clear per-document
+    headers, so the agent can tell which financial data came from which
+    uploaded file. Falls back to direct_context if provided (e.g. a single
+    pre-extracted blob passed straight through by the Lambda), and to a
+    single-document lookup if only one report_id is given.
+    """
+
+    if direct_context:
+        return direct_context
+
+    report_ids = [r for r in (report_ids or []) if r]
+
+    if not report_ids:
+        return ""
+
+    if len(report_ids) == 1:
+        return get_report_context(report_id=report_ids[0])
+
+    sections = []
+    for index, report_id in enumerate(report_ids, start=1):
+        context = get_report_context(report_id=report_id)
+        if not context:
+            continue
+        sections.append(
+            f"=== Document {index} of {len(report_ids)} (report_id: {report_id}) ===\n{context}"
+        )
+
+    if not sections:
+        return ""
+
+    return "\n\n".join(sections)
+
+
 def build_context_summary(context, max_chars=12000):
     """
     Reduce context size before sending to Claude.

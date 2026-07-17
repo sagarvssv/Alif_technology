@@ -116,6 +116,10 @@ function getRisk(raw = "") {
   return RISK_LEVELS[key] || RISK_LEVELS[key.replace("–", "-")] || null;
 }
 
+function isUnassessedRisk(raw = "") {
+  return (raw || "").toLowerCase().trim() === "to be assessed";
+}
+
 function extractText(node) {
   if (!node && node !== 0) return "";
   if (typeof node === "string" || typeof node === "number") return String(node);
@@ -142,6 +146,18 @@ function parseRiskRows(markdown = "") {
     }
     const cfg = getRisk(riskRaw);
     if (!cfg) continue;
+
+    // "To Be Assessed" rows mean the agent found no evidence either way in
+    // the uploaded document — this is NOT a confirmed finding, so it must
+    // not be counted as either a risk needing attention or an improved /
+    // low-risk area. Only genuinely-rated rows (High/Medium-High/Medium/
+    // Low-Medium/Low) belong in the Gap Analysis breakdown below. This
+    // keeps "Needs Attention" / "Improved" meaningful, and means the
+    // whole Gap Analysis panel simply won't render at all when a document
+    // produced zero genuine findings — which is correct, since there's
+    // nothing genuine to show.
+    if (isUnassessedRisk(riskRaw)) continue;
+
     const item = {
       area: cells[0], description: cells[1] || "",
       riskRaw, response,
@@ -391,6 +407,24 @@ function GapAnalysisPanel({ riskData, onItemClick }) {
 function RiskBadge({ rawText, onBadgeClick }) {
   const cfg = getRisk(rawText);
   if (!cfg) return <span>{rawText}</span>;
+
+  // "To Be Assessed" cells are informational, not a confirmed finding —
+  // they're excluded from the Gap Analysis data entirely (see
+  // parseRiskRows), so there is no matching item to open a details modal
+  // for. Showing a live-looking "⚠️ Details" button that silently does
+  // nothing when clicked is worse than showing no button at all, so this
+  // renders a plain neutral badge instead.
+  if (isUnassessedRisk(rawText)) {
+    return (
+      <span className="risk-badge" style={{ background: cfg.bg, color: cfg.text }}>
+        <span className="risk-bar-wrap">
+          <span className="risk-bar" style={{ width: `${cfg.pct}%`, background: cfg.bar }} />
+        </span>
+        <strong className="risk-pct">N/A</strong>
+      </span>
+    );
+  }
+
   return (
     <span className="risk-badge" style={{ background: cfg.bg, color: cfg.text }}>
       <span className="risk-bar-wrap">
@@ -417,20 +451,20 @@ function AuditHeading({ tag: Tag, children }) {
 }
 
 function buildComponents(isAudit, riskData, onBadgeClick) {
-  if (!isAudit) {
-    return {
-      h1: ({ children }) => <h2>{children}</h2>,
-      h2: ({ children }) => <h3>{children}</h3>,
-      h3: ({ children }) => <h4>{children}</h4>,
-    };
-  }
   const allItems   = [...(riskData?.needsAttention || []), ...(riskData?.improved || [])];
   const itemByArea = new Map(allItems.map((item) => [item.area.toLowerCase().trim(), item]));
   let pendingArea  = "";
-  return {
+
+  const headingComponents = {
     h1: ({ children }) => <AuditHeading tag="h2">{children}</AuditHeading>,
     h2: ({ children }) => <AuditHeading tag="h3">{children}</AuditHeading>,
     h3: ({ children }) => <AuditHeading tag="h4">{children}</AuditHeading>,
+  };
+
+  if (!isAudit) return headingComponents;
+
+  return {
+    ...headingComponents,
     tr: ({ children }) => {
       const cells = React.Children.toArray(children);
       if (cells.length > 0) {
@@ -458,6 +492,7 @@ function buildComponents(isAudit, riskData, onBadgeClick) {
 // ─── Main Chatbot ─────────────────────────────────────────────────────
 function Chatbot({
   reportId,
+  reportIds,
   selectedReport,
   generalMode,
   managerMode,
@@ -625,6 +660,7 @@ function Chatbot({
           question:      q,
           sessionId,
           reportId:      generalMode ? null : reportId,
+          reportIds:     generalMode ? [] : (Array.isArray(reportIds) && reportIds.length ? reportIds : (reportId ? [reportId] : [])),
           selectedAgent: generalMode ? "general_kb_agent" : agentId,
           agent:         generalMode ? "general_kb_agent" : agentId,
           generalMode:   generalMode  || false,
@@ -676,7 +712,7 @@ function Chatbot({
   }, [messages, loading]);
 
   return (
-    <section className="chatbot-card">
+    <section className={generalMode ? "chatbot-card chatbot-card-general" : "chatbot-card"}>
       {modalItem && <ItemModal item={modalItem} onClose={() => setModalItem(null)} />}
 
       <div className="chatbot-messages">

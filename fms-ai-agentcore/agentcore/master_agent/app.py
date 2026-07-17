@@ -23,7 +23,7 @@ FS_REVIEW_AGENT_RUNTIME_ARN = os.environ.get(
 
 agentcore_runtime = boto3.client("bedrock-agentcore", region_name=AGENTCORE_REGION)
 
-# ── Sub-agent registry ──────────────────────────────────────────────────
+# ── Sub-agent registry ─────────────────────────────────────────────────
 SUB_AGENT_REGISTRY = {
     "audit_planning_agent": {
         "display_name": "Audit Planning Agent",
@@ -197,6 +197,23 @@ STRICT RULES:
   Use actual figures if present.
 - If a report is missing or empty, say so plainly in 1 sentence instead.
 - Do NOT repeat tables, bullet lists, or headings from the original reports.
+
+CRITICAL — do not upgrade unassessed items into findings:
+- The sub-agent reports may mark some rows as "To Be Assessed" (or
+  similar wording like "cannot assess", "N/A — no data provided").
+  These are NOT confirmed risks or issues — they mean the underlying
+  agent had insufficient document data to make a judgment.
+- When picking the "top 1-2 risk areas" or "top 1-2 most critical
+  issues", only choose items that carry an actual confirmed rating
+  (e.g. High, Medium-High, Medium) or a genuine documentation-gap
+  finding (e.g. "No Financial Statements Provided"). Never present a
+  "To Be Assessed" item as if it were a confirmed risk or issue.
+- If NONE of the rows in a report carry a confirmed rating — i.e. the
+  report is almost entirely "To Be Assessed" — say so directly instead
+  of picking two items anyway (e.g. "Risk could not be meaningfully
+  assessed because the uploaded document lacks financial statement
+  data.").
+
 - Output EXACTLY in this format, nothing else, no extra commentary:
 
 ## AUDIT_SUMMARY

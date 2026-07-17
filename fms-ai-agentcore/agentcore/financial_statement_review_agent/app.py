@@ -116,7 +116,7 @@ def run_agent(payload):
 
     user_message = original_user_message or "Review financial statement."
 
-    # ── GENERAL Q&A MODE ─────────────────────────────────────────────────
+    # ── GENERAL Q&A MODE ─────────────────────────────────────────────
     if general_mode or not report_ids:
         kb_context, citations = retrieve_from_kb(user_message, number_of_results=6)
         answer = answer_general_question(
@@ -131,12 +131,12 @@ def run_agent(payload):
             extra={"agentType": "general", "agentName": "General Q&A Agent"},
         )
 
-    # ── Load document context (one or many uploaded files, combined) ──────
+    # ── Load document context (one or many uploaded files, combined) ──
     report_context  = get_combined_report_context(report_ids=report_ids, direct_context=direct_context)
     max_context_chars = 18000 * min(len(report_ids), 3)
     context_summary = build_context_summary(compact_text(report_context, max_chars=max_context_chars))
 
-    # ── ROUTE ─────────────────────────────────────────────────────────────
+    # ── ROUTE ─────────────────────────────────────────────────────────
     if is_generate_request(user_message):
         kb_query = build_kb_query(user_message, report_context, compact_text)
         kb_context, citations = retrieve_from_kb(kb_query, number_of_results=6)
@@ -217,8 +217,8 @@ Answer the question directly and concisely.
         return f"Unable to retrieve an answer at this time. Error: {str(exc)}"
 
 
-# ── Follow-up question about uploaded document ───────────────────────
-def answer_document_question(invoke_claude, user_message, report_context, kb_context):
+# ── Follow-up question about uploaded document ────────────────────────
+def answer_document_question(invoke_claude, user_message, report_context,kb_context):
     system_prompt = """
 You are an expert IFRS financial statement reviewer.
 The user has an uploaded draft financial statement and has already seen the full
@@ -256,7 +256,7 @@ Answer the question directly and concisely.
         return f"Unable to retrieve an answer at this time. Error: {str(exc)}"
 
 
-# ── Resolution plan for a specific flagged issue ─────────────────────
+# ── Resolution plan for a specific flagged issue ────────────────────────
 def generate_issue_resolution_plan(invoke_claude, user_message, issue_area, report_context, kb_context):
     system_prompt = """
 You are a senior IFRS technical accounting specialist.
@@ -334,6 +334,18 @@ LANGUAGE RULES:
 - No long paragraphs. Use short bullet points only.
 - Use actual numbers from the document (e.g. AED 3,100,000).
 - If data is missing, write: Not available.
+- NEVER assign a specific Risk Rating to a finding that requires
+  financial data (ratios, balances, classification amounts) the
+  document does not contain — use "To Be Assessed" for those instead
+  of guessing a number or level. Always use that exact phrase, not
+  "N/A" or other wording, so it is handled consistently everywhere it
+  appears in the report.
+- The ABSENCE of required financial statements, disclosures, or
+  supporting data IS itself a legitimate finding and may correctly be
+  rated High risk — that is reporting a real gap, not fabrication.
+  Fabrication means inventing a specific financial conclusion (a ratio
+  value, a balance issue, a classification judgment) the document
+  gives no evidence for either way.
 
 FORMAT RULES:
 - Use markdown tables where requested.
@@ -368,13 +380,18 @@ Each section must start with the exact heading shown. Separate sections with: --
 # Review Summary
 A simple table:
 | Item | Detail |
-Show: Client name, Period reviewed, Overall opinion (one short sentence), Number of issues found.
+Show: Client name, Period reviewed, Overall opinion (one short sentence),Number of issues found.
 Maximum 5 rows.
 
 # Ratio and Trend Analysis
 Show this table exactly:
 | Ratio | Current Period | Prior Period | Trend | Observation |
-Use actual numbers from the document. Cover liquidity, profitability, and leverage ratios.
+Use actual numbers from the document. Cover liquidity, profitability, andleverage ratios.
+If the document does not contain the balance sheet / income statement
+figures needed for a ratio, write "N/A — no data provided" in the
+Current Period and Prior Period columns, and "Cannot assess — requires
+[which figures are missing]" in Observation. Do NOT invent numbers or a
+Trend direction when the underlying figures are not in the document.
 Maximum 6 rows.
 
 # Findings
@@ -383,14 +400,40 @@ Show this table exactly:
 Cover findings from ALL seven review functions above (IFRS compliance, missing
 disclosures, note consistency, classification, ratio/trend concerns, going
 concern indicators, related party disclosures).
-Risk Rating must be exactly one of: High, Medium-High, Medium, Low-Medium, Low.
+Risk Rating must be exactly one of: High, Medium-High, Medium, Low-Medium, Low, To Be Assessed.
 Standard Reference must cite the specific IFRS/IAS standard (e.g. "IAS 1.54",
 "IFRS 7.31", "IAS 24.18").
 Recommendation must be one short, specific, actionable sentence.
 Maximum 10 rows. Order by Risk Rating, highest first.
 
+Risk Rating guidance — do not fabricate specific conclusions:
+- A finding about MISSING documentation itself (e.g. "No Financial
+  Statements Provided", "No Related Party Disclosures") is a real,
+  valid finding and can be rated High — flagging an absence is not
+  fabrication.
+- A finding that requires you to judge a SPECIFIC financial detail
+  (e.g. whether a balance is correctly classified, whether a ratio is
+  healthy, whether an accrual is adequate) must use Risk Rating
+  "To Be Assessed" if the document does not contain the underlying
+  figures needed to make that judgment. Do not guess a High/Medium/Low
+  rating for a conclusion the document gives no basis for.
+- Always use the exact phrase "To Be Assessed" — never "N/A" or any
+  other wording — so it is handled consistently.
+
 # Going Concern Assessment
 3-5 short bullets on whether going concern indicators were identified, and why.
+If there is not enough financial data to assess going concern at all,
+say so plainly rather than drawing a conclusion from insufficient evidence.
+
+# Overall Review Summary
+Write one short paragraph (3-4 sentences). Cover:
+- What was actually submitted (name the client and state clearly
+  whether this was a proper set of financial statements or something
+  else, e.g. a tax payment slip or single transaction record).
+- The overall opinion in plain terms, and how many issues were found.
+- The single most important next step for management (usually:
+  prepare and submit full IFRS financial statements).
+Do not repeat the tables above. Write this as plain narrative text.
 
 Do not write anything after the last section.
 """
@@ -401,6 +444,7 @@ SECTION_HEADINGS = [
     "Ratio and Trend Analysis",
     "Findings",
     "Going Concern Assessment",
+    "Overall Review Summary",
 ]
 
 
