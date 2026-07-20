@@ -364,16 +364,12 @@ Knowledge Base:
 {kb_context or "None."}
 
 Generate a SHORT, SIMPLE financial statement review report. Write for a non-accountant.
-Use plain English. Short bullets only. No long paragraphs.
+Use plain English. No long paragraphs.
 
-Review the draft financial statements across these seven functions:
-1. IFRS compliance review
-2. Missing disclosures
-3. Note consistency checks
-4. Classification review
-5. Ratio and trend analysis
-6. Going concern indicators
-7. Related party disclosure review
+Review the draft financial statements across exactly these seven functions,
+each as its OWN separate section with its OWN table — do not combine
+functions into one shared table, and do not skip any function even if it
+produced only one finding (or zero — see the "no issues" rule below).
 
 Each section must start with the exact heading shown. Separate sections with: ---
 
@@ -383,47 +379,82 @@ A simple table:
 Show: Client name, Period reviewed, Overall opinion (one short sentence),Number of issues found.
 Maximum 5 rows.
 
-# Ratio and Trend Analysis
-Show this table exactly:
-| Ratio | Current Period | Prior Period | Trend | Observation |
-Use actual numbers from the document. Cover liquidity, profitability, andleverage ratios.
-If the document does not contain the balance sheet / income statement
-figures needed for a ratio, write "N/A — no data provided" in the
-Current Period and Prior Period columns, and "Cannot assess — requires
-[which figures are missing]" in Observation. Do NOT invent numbers or a
-Trend direction when the underlying figures are not in the document.
-Maximum 6 rows.
-
-# Findings
+# IFRS Compliance Review
 Show this table exactly:
 | Issue | Standard Reference | Risk Rating | Recommendation |
-Cover findings from ALL seven review functions above (IFRS compliance, missing
-disclosures, note consistency, classification, ratio/trend concerns, going
-concern indicators, related party disclosures).
-Risk Rating must be exactly one of: High, Medium-High, Medium, Low-Medium, Low, To Be Assessed.
-Standard Reference must cite the specific IFRS/IAS standard (e.g. "IAS 1.54",
-"IFRS 7.31", "IAS 24.18").
-Recommendation must be one short, specific, actionable sentence.
-Maximum 10 rows. Order by Risk Rating, highest first.
+Only issues about whether the submission complies with IFRS presentation
+and reporting requirements generally (e.g. IAS 1 overall compliance).
+Maximum 3 rows.
 
-Risk Rating guidance — do not fabricate specific conclusions:
+# Missing Disclosures
+Show this table exactly:
+| Issue | Standard Reference | Risk Rating | Recommendation |
+Only issues about disclosures/notes/statements that are absent (balance
+sheet, income statement, cash flow statement, accounting policy notes,
+tax disclosures, entity information, etc.).
+Maximum 4 rows.
+
+# Note Consistency Checks
+Show this table exactly:
+| Issue | Standard Reference | Risk Rating | Recommendation |
+Only issues about whether dates, figures, or references in the document
+are internally consistent with each other (e.g. period-end mismatches,
+currency inconsistencies, reference numbers not matching elsewhere).
+Maximum 3 rows.
+
+# Classification Review
+Show this table exactly:
+| Issue | Standard Reference | Risk Rating | Recommendation |
+Only issues about whether amounts are correctly classified (current vs
+non-current, asset vs liability, VAT/tax classification, entity type
+treatment, revenue classification).
+Maximum 3 rows.
+
+# Ratio and Trend Analysis
+Show this table exactly:
+| Issue | Standard Reference | Risk Rating | Recommendation |
+Frame each standard ratio (current ratio, gross margin, net margin,
+debt-to-equity, return on assets, receivables days, etc.) as an "Issue"
+row — e.g. "Current Ratio cannot be assessed — no balance sheet data."
+If the document contains a real relevant figure (e.g. a VAT return
+revenue amount), note it in the Issue and use that to inform the Risk
+Rating; otherwise the Risk Rating must be "To Be Assessed" — never
+invent a ratio value or trend the document does not support.
+Maximum 6 rows.
+
+# Going Concern Indicators
+Show this table exactly:
+| Issue | Standard Reference | Risk Rating | Recommendation |
+Only issues about the entity's ability to continue operating (cash
+position, liabilities, forecast, trading activity evidence).
+Maximum 3 rows.
+
+# Related Party Disclosure Review
+Show this table exactly:
+| Issue | Standard Reference | Risk Rating | Recommendation |
+Only issues about related party relationships, transactions, ownership
+structure, or group structure disclosures.
+Maximum 3 rows.
+
+RULES THAT APPLY TO EVERY TABLE ABOVE:
+- Standard Reference must cite the specific IFRS/IAS standard (e.g. "IAS 1.54",
+  "IFRS 7.31", "IAS 24.18").
+- Risk Rating must be exactly one of: High, Medium-High, Medium, Low-Medium, Low, To Be Assessed.
+- Recommendation must be one short, specific, actionable sentence.
 - A finding about MISSING documentation itself (e.g. "No Financial
-  Statements Provided", "No Related Party Disclosures") is a real,
-  valid finding and can be rated High — flagging an absence is not
-  fabrication.
-- A finding that requires you to judge a SPECIFIC financial detail
-  (e.g. whether a balance is correctly classified, whether a ratio is
-  healthy, whether an accrual is adequate) must use Risk Rating
-  "To Be Assessed" if the document does not contain the underlying
-  figures needed to make that judgment. Do not guess a High/Medium/Low
-  rating for a conclusion the document gives no basis for.
+  Statements Provided") is a real, valid finding and can be rated High —
+  flagging an absence is not fabrication.
+- A finding that requires judging a SPECIFIC financial detail (a ratio
+  value, a balance classification, an accrual adequacy) must use Risk
+  Rating "To Be Assessed" if the document does not contain the
+  underlying figures needed to make that judgment. Never guess a
+  High/Medium/Low rating for a conclusion the document gives no basis for.
 - Always use the exact phrase "To Be Assessed" — never "N/A" or any
   other wording — so it is handled consistently.
-
-# Going Concern Assessment
-3-5 short bullets on whether going concern indicators were identified, and why.
-If there is not enough financial data to assess going concern at all,
-say so plainly rather than drawing a conclusion from insufficient evidence.
+- If a function genuinely has zero findings (nothing wrong and nothing
+  missing in that area), include exactly one row stating
+  "No issues identified in this area." with Risk Rating "Low" instead
+  of leaving the table empty or omitting the section.
 
 # Overall Review Summary
 Write one short paragraph (3-4 sentences). Cover:
@@ -441,9 +472,13 @@ Do not write anything after the last section.
 
 SECTION_HEADINGS = [
     "Review Summary",
+    "IFRS Compliance Review",
+    "Missing Disclosures",
+    "Note Consistency Checks",
+    "Classification Review",
     "Ratio and Trend Analysis",
-    "Findings",
-    "Going Concern Assessment",
+    "Going Concern Indicators",
+    "Related Party Disclosure Review",
     "Overall Review Summary",
 ]
 
