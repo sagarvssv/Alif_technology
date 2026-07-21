@@ -1848,3 +1848,70 @@ input  { font-family: inherit; }
   transition: background 0.15s;
 }
 .master-overview-btn:hover { background: var(--at-blue-mid); }
+
+/* ─── Processing Progress Bar ─────────────────────────────────────── */
+
+.processing-progress-wrap {
+  margin: 0;
+  padding: 14px 20px;
+  background: #eff6ff;
+  border-bottom: 1px solid #bfdbfe;
+  flex-shrink: 0;
+}
+
+.processing-progress-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+  font-weight: 700;
+  color: #1e40af;
+  margin-bottom: 8px;
+}
+
+.processing-progress-header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.processing-pct {
+  font-size: 14px;
+  font-weight: 900;
+  color: #1a56db;
+}
+
+.processing-cancel-btn {
+  border: 1px solid #bfdbfe;
+  background: #fff;
+  color: #1e40af;
+  font-size: 11.5px;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.processing-cancel-btn:hover { background: #eff6ff; }
+
+.processing-progress-track {
+  width: 100%;
+  height: 8px;
+  background: #bfdbfe;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.processing-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #1a56db, #06b6d4);
+  border-radius: 999px;
+  transition: width 0.8s ease;
+}
+
+.processing-progress-label {
+  margin-top: 6px;
+  font-size: 11px;
+  color: #3b82f6;
+  font-weight: 600;
+}

@@ -226,12 +226,19 @@ function extractSection(markdown = "", heading = "") {
 }
 
 // ─── Progress Bar ─────────────────────────────────────────────────────
-function ProcessingProgress({ progress }) {
+function ProcessingProgress({ progress, onCancel }) {
   return (
     <div className="processing-progress-wrap">
       <div className="processing-progress-header">
         <span>⏳ Processing document…</span>
-        <span className="processing-pct">{progress}%</span>
+        <span className="processing-progress-header-right">
+          <span className="processing-pct">{progress}%</span>
+          {onCancel && (
+            <button className="processing-cancel-btn" onClick={onCancel} type="button">
+              ✕ Cancel
+            </button>
+          )}
+        </span>
       </div>
       <div className="processing-progress-track">
         <div className="processing-progress-fill" style={{ width: `${progress}%` }} />
@@ -575,6 +582,19 @@ function App() {
   function stopPolling() {
     if (pollingRef.current)  { clearInterval(pollingRef.current);  pollingRef.current  = null; }
     if (progressRef.current) { clearInterval(progressRef.current); progressRef.current = null; }
+  }
+
+  // Lets the user back out of an in-progress upload. This stops the
+  // frontend from waiting/polling for the result — it does NOT cancel
+  // anything already running on the backend (Textract/S3 processing for
+  // files already uploaded continues regardless), but the app no longer
+  // blocks the user on it, and no partially-finished document gets wired
+  // up as the "selected" one if it happens to finish later.
+  function handleCancelProcessing() {
+    stopPolling();
+    setProcessing(false);
+    setProcessingProgress(0);
+    setError("Upload cancelled.");
   }
 
   function startProgressSimulation() {
@@ -1535,7 +1555,7 @@ function App() {
           </div>
         )}
 
-        {processing && <ProcessingProgress progress={processingProgress} />}
+        {processing && <ProcessingProgress progress={processingProgress} onCancel={handleCancelProcessing} />}
 
         {/* USER HOME */}
         {view === VIEW_HOME && (
