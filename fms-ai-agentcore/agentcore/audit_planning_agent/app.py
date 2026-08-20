@@ -97,6 +97,101 @@ def extract_risk_area(message: str) -> str:
     return ""
 
 
+# ─── Deterministic Evidence Relevance Check (PERMANENT FIX) ─────────────
+# Replaces the old approach of asking the AI to regenerate the ENTIRE
+# report and hoping the target risk's row changed in a sensible way.
+# That approach was non-deterministic: the same document uploaded twice
+# could produce different risk levels, and there was no way to guarantee
+# "not relevant" evidence left the risk untouched.
+#
+# Instead: ask the AI ONLY two narrow yes/no questions about ONE risk and
+# ONE document. The frontend then computes the new risk level itself
+# using a fixed lookup table — never trusting the AI to invent a level —
+# so the same (relevant, resolves) answer ALWAYS produces the same
+# outcome, every single time.
+def assess_evidence_relevance(invoke_claude, risk_area, risk_description, planned_response, evidence_text):
+    system_prompt = """
+You are assessing whether a specific document is relevant evidence for a
+specific audit risk. Respond with STRICT JSON only — no other text, no
+markdown code fences, no explanation outside the JSON object.
+
+Schema (exactly these five fields, nothing else):
+{
+  "relevant": true or false,
+  "resolves_risk": true or false,
+  "reason": "one short sentence explaining your decision",
+  "specifically_addressed": "what part of the risk this document actually confirms, in plain terms — empty string if not relevant",
+  "still_outstanding": "what part of the Planned Response remains unconfirmed or unexplained by this document — empty string if fully resolved or not relevant"
+}
+
+Rules:
+- "relevant" = false if the document has nothing meaningfully to do with
+  this specific risk area (e.g. a trade license uploaded for a bank
+  reconciliation risk, or a VAT return uploaded for a fixed asset risk).
+  If relevant is false, resolves_risk MUST also be false, and both
+  specifically_addressed and still_outstanding MUST be empty strings.
+- "relevant" = true if the document discusses, confirms, explains, or
+  directly addresses this risk's subject matter, even partially.
+- "resolves_risk" = true ONLY if the document fully and directly answers
+  everything described in the Planned Response below — every number,
+  every condition, with no gaps remaining. In this case
+  still_outstanding MUST be an empty string.
+- "resolves_risk" = false if the document is relevant but leaves any
+  part of the Planned Response unaddressed or unconfirmed.
+- "specifically_addressed" must name the CONCRETE fact confirmed (e.g.
+  "Bank balance of AED 542,000 confirmed by bank statement"), not a
+  vague summary. This is required whenever relevant is true.
+- "still_outstanding" must name the CONCRETE gap that remains (e.g.
+  "The AED 62,000 reconciling difference between books and bank is not
+  explained — no listing of outstanding cheques or deposits in
+  transit was provided"). This is required whenever relevant is true
+  and resolves_risk is false.
+- Be decisive. Do not hedge. Pick true or false for each boolean field.
+- Never invent facts not present in the evidence document text.
+"""
+    user_prompt = f"""
+Risk area: {risk_area}
+Risk description: {risk_description}
+Planned Response (exactly what evidence would need to show to resolve this risk):
+{planned_response}
+
+Evidence document text (this is the ONLY document being assessed):
+{evidence_text}
+
+Return the JSON assessment now. Nothing else.
+"""
+    result = invoke_claude(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        max_tokens=300,
+        temperature=0,
+    )
+    cleaned = (result or "").strip()
+    # Strip accidental markdown fences if the model adds them anyway.
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:].strip()
+    try:
+        parsed = json.loads(cleaned)
+        is_relevant = bool(parsed.get("relevant", False))
+        return {
+            "relevant": is_relevant,
+            "resolves_risk": bool(parsed.get("resolves_risk", False)) if is_relevant else False,
+            "reason": str(parsed.get("reason", "")).strip() or "No reason provided.",
+            "specifically_addressed": str(parsed.get("specifically_addressed", "")).strip() if is_relevant else "",
+            "still_outstanding": str(parsed.get("still_outstanding", "")).strip() if is_relevant else "",
+        }
+    except Exception:
+        return {
+            "relevant": False,
+            "resolves_risk": False,
+            "reason": "Could not determine relevance — the assessment could not be parsed. Treating as not relevant to avoid an incorrect risk reduction.",
+            "specifically_addressed": "",
+            "still_outstanding": "",
+        }
+
+
 def run_agent(payload):
     prepare_imports()
 
@@ -110,6 +205,32 @@ def run_agent(payload):
         get_message_from_payload,
         get_report_ids_from_payload,
     )
+
+    # ── Deterministic relevance-check route (checked FIRST, before any
+    # other routing, since it doesn't need the general_mode/report_ids
+    # gating below — it only needs the single evidence document). ──────
+    relevance_check = payload.get("relevanceCheck")
+    if relevance_check and isinstance(relevance_check, dict):
+        evidence_report_ids = get_report_ids_from_payload(payload)
+        direct_context_rc = get_direct_context_from_payload(payload)
+        evidence_text = get_combined_report_context(
+            report_ids=evidence_report_ids, direct_context=direct_context_rc
+        )
+        evidence_text = compact_text(evidence_text, max_chars=12000)
+
+        verdict = assess_evidence_relevance(
+            invoke_claude=invoke_claude,
+            risk_area=relevance_check.get("riskArea", ""),
+            risk_description=relevance_check.get("riskDescription", ""),
+            planned_response=relevance_check.get("plannedResponse", ""),
+            evidence_text=evidence_text,
+        )
+        return build_response(
+            answer=json.dumps(verdict),
+            selected_agent=AGENT_NAME,
+            citations=[],
+            extra={"agentType": "relevance_check", "agentName": "Audit Planning Agent"},
+        )
 
     original_user_message = get_message_from_payload(payload)
     report_ids             = get_report_ids_from_payload(payload)
@@ -158,6 +279,7 @@ def run_agent(payload):
             report_context=context_summary,
             kb_context=kb_context,
             citation_details=citation_details,
+            document_count=len(report_ids),
         )
 
     elif is_improve_request(user_message):
@@ -231,10 +353,10 @@ Answer the question directly and concisely.
 
 
 # ── Follow-up question about uploaded document ────────────────────────
-def answer_document_question(invoke_claude, user_message, report_context,kb_context):
+def answer_document_question(invoke_claude, user_message, report_context, kb_context):
     system_prompt = """
 You are an expert audit and financial analyst assistant.
-The user has an uploaded financial document and has already seen the fullaudit plan.
+The user has an uploaded financial document and has already seen the full audit plan.
 They are now asking a specific follow-up question about it.
 
 STRICT RULES:
@@ -290,7 +412,7 @@ FORMAT RULES:
 - Do NOT regenerate the full audit plan.
 - Focus ONLY on the specific risk area asked about.
 """
-    area_label = risk_area.title() if risk_area else "the identified riskarea"
+    area_label = risk_area.title() if risk_area else "the identified risk area"
     user_prompt = f"""
 Document financial data:
 {report_context or "No document context available."}
@@ -315,7 +437,7 @@ Numbered list of specific steps management must take to reduce this risk.
 Use actual document figures where relevant (AED amounts, percentages, dates).
 
 ### ✅ How the Auditor Will Verify Improvement
-Numbered list of what the auditor will check to confirm the risk has beenreduced.
+Numbered list of what the auditor will check to confirm the risk has been reduced.
 
 ### 📊 Expected Outcome
 Brief statement on what risk level this area should reach after improvements are implemented.
@@ -372,11 +494,24 @@ FORMAT RULES:
 """
 
 
-def combined_prompt(user_message, report_context, kb_context, citation_details):
+def combined_prompt(user_message, report_context, kb_context, citation_details, document_count=1):
+    multi_doc_note = ""
+    if document_count and document_count > 1:
+        multi_doc_note = """
+
+NOTE: More than one document has been provided in the context above. The
+FIRST document is the primary financial record being audited. Any
+document beyond the first should be treated as supporting evidence
+submitted by management — most commonly, evidence submitted in response
+to a previously identified risk (e.g. a stock count sheet, a receivables
+ageing report, a signed board resolution). Apply this when writing the
+Risk Assessment section below.
+"""
+
     return f"""
 Financial statement context:
 {report_context}
-
+{multi_doc_note}
 Knowledge Base:
 {kb_context or "None."}
 
@@ -432,6 +567,28 @@ CRITICAL — do not invent risk findings:
   from what the document DOES show.
 - Always use the exact phrase "To Be Assessed" — never "N/A", "Not
   applicable", or any other wording — so it is handled consistently.
+- If more than one document is provided in the context above, treat any
+  document beyond the first as supporting evidence submitted by
+  management in response to a previously identified risk. Assess how
+  strongly it addresses THAT SPECIFIC risk's Planned Response, and grade
+  your response into exactly one of three tiers:
+  1. FULLY RESOLVES — the evidence directly and completely satisfies
+     everything the Planned Response asks the auditor to check (e.g. a
+     signed related-party confirmation letter matching the balance and
+     terms). Move the Risk Level down significantly (e.g. High -> Low),
+     and note in the row what was confirmed.
+  2. PARTIALLY CORROBORATES — the evidence is genuinely relevant and
+     supports part of the Planned Response, but does not fully close
+     every element of it (e.g. a bank confirmation shows the related
+     party has real assets and liquidity, supporting recoverability,
+     but doesn't confirm the loan's exact terms or repayment demand).
+     Move the Risk Level down ONE step (e.g. High -> Medium, or
+     Medium -> Low), and explicitly note what remains outstanding.
+  3. NOT RELEVANT — the evidence does not address this risk's Planned
+     Response at all. Leave the Risk Level and reasoning completely
+     unchanged.
+  Do not skip straight from High to Low unless tier 1 is clearly met.
+  Never invent tier 1 or 2 for evidence that is actually tier 3.
 
 # Audit Programs
 For each area, write 3 short bullets only. Areas: Inventory, Revenue,
@@ -456,6 +613,8 @@ Write one short paragraph (3-4 sentences). Cover:
   provided — say this plainly if it is the case.
 - The single most important next step (usually: obtain full financial
   statements from management before further audit work can proceed).
+- If supporting evidence was provided and resolved any risks, briefly
+  mention which ones and why.
 Do not repeat the tables above. Write this as plain narrative text.
 
 Do not write anything after the last section.
@@ -484,7 +643,7 @@ def ensure_all_sections_present(answer):
 
 
 def generate_complete_audit_planning_output(
-    invoke_claude, user_message, report_context, kb_context, citation_details,
+    invoke_claude, user_message, report_context, kb_context, citation_details, document_count=1,
 ):
     try:
         result = invoke_claude(
@@ -494,6 +653,7 @@ def generate_complete_audit_planning_output(
                 report_context=report_context,
                 kb_context=kb_context,
                 citation_details=citation_details,
+                document_count=document_count,
             ),
             max_tokens=2500,
             temperature=0,

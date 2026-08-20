@@ -79,11 +79,10 @@ function setReviewerNameStorage(name) {
 }
 
 const RISK_STATUS_LABELS = {
-  open:            { label: "Open",             icon: "🔴" },
-  in_process:      { label: "In Process",       icon: "🟡" },
-  review:          { label: "Review",           icon: "🔵" },
-  closed_resolved: { label: "Closed / Resolved", icon: "✅" },
-  other:           { label: "Other",            icon: "⚪" },
+  open:      { label: "Open",      icon: "🔴" },
+  in_review: { label: "In Review", icon: "🟡" },
+  resolved:  { label: "Resolved",  icon: "✅" },
+  closed:    { label: "Closed",    icon: "⚪" },
 };
 
 function MasterRiskReviewPanel({ reportId, onRegenerateWithEvidence }) {
@@ -650,7 +649,7 @@ function FinancialIcon() {
 }
 
 // ─── History Entry Detail Modal ────────────────────────────────────────
-// Opened by clicking any line in the Alif Technologies — Project History list. Shows the full
+// Opened by clicking any line in the Project History list. Shows the full
 // note text, a human-readable action type, and the exact date/time —
 // everything currently tracked for a history entry.
 function HistoryDetailModal({ entry, onClose }) {
@@ -1568,7 +1567,7 @@ function App() {
       <div className="portal-screen">
         <div className="portal-hero">
           <div className="portal-logo">AT</div>
-          <h1 className="portal-title">Alif Technologies</h1>
+          <h1 className="portal-title"></h1>
           <p className="portal-sub">FMS AI AgentCore — Enterprise Audit Intelligence Platform</p>
         </div>
         <p className="portal-prompt">Select your portal to continue</p>
@@ -1610,7 +1609,7 @@ function App() {
             {portal === "audit" ? <AuditShieldIcon size={20} /> : "AT"}
           </div>
           <div className="brand-text">
-            <span className="brand-name">Alif Technologies</span>
+            <span className="brand-name"></span>
             <span className="brand-sub">
               {portal === "manager" ? "Manager Portal" : portal === "audit" ? "Audit Portal" : "User Portal"}
             </span>
@@ -1687,6 +1686,14 @@ function App() {
                 )}
               </button>
             ))}
+
+          <button
+            className={`sidebar-agent-btn ${view === VIEW_RISK_REVIEW ? "sidebar-agent-active" : ""}`}
+            onClick={() => navigateTo(VIEW_RISK_REVIEW)}
+          >
+            <span className="sidebar-agent-icon">🗂️</span>
+            <span className="sidebar-agent-label">Risk Review & Resolution</span>
+          </button>
           </div>
         )}
 
@@ -1787,6 +1794,13 @@ function App() {
                               )}
                             </button>
                           ))}
+                        <button
+                          className={`sidebar-agent-btn sidebar-agent-btn-nested ${isActiveDoc && view === VIEW_RISK_REVIEW ? "sidebar-agent-active" : ""}`}
+                          onClick={() => { openDocumentAgent(f, "master"); navigateTo(VIEW_RISK_REVIEW); }}
+                        >
+                          <span className="sidebar-agent-icon">🗂️</span>
+                          <span className="sidebar-agent-label">Risk Review & Resolution</span>
+                        </button>
                         </div>
                       )}
                     </div>
@@ -1873,7 +1887,7 @@ function App() {
           <div className="home-view">
             <div className="home-hero">
               <div className="home-hero-logo">AT</div>
-              <h1 className="home-hero-title">Alif Technologies</h1>
+              <h1 className="home-hero-title"></h1>
               <p className="home-hero-sub">FMS AI AgentCore — Enterprise Audit Intelligence Platform</p>
               <div className="portal-badge">👤 User Portal</div>
             </div>
@@ -2160,9 +2174,6 @@ function App() {
               reportMarkdown={[agentReports.audit_planning_agent?.content, agentReports.fs_review_agent?.content]
                 .filter(Boolean)
                 .join("\n\n---\n\n")}
-              reportId={selectedReportId}
-              auditPlanningMarkdown={agentReports.audit_planning_agent?.content}
-              fsReviewMarkdown={agentReports.fs_review_agent?.content}
               onUpdateProject={(updates) =>
                 setSelectedProjectItem((prev) => ({ ...prev, ...updates }))
               }

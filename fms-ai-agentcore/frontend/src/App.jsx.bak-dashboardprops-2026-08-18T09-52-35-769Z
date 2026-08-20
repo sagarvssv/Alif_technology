@@ -79,11 +79,10 @@ function setReviewerNameStorage(name) {
 }
 
 const RISK_STATUS_LABELS = {
-  open:            { label: "Open",             icon: "🔴" },
-  in_process:      { label: "In Process",       icon: "🟡" },
-  review:          { label: "Review",           icon: "🔵" },
-  closed_resolved: { label: "Closed / Resolved", icon: "✅" },
-  other:           { label: "Other",            icon: "⚪" },
+  open:      { label: "Open",      icon: "🔴" },
+  in_review: { label: "In Review", icon: "🟡" },
+  resolved:  { label: "Resolved",  icon: "✅" },
+  closed:    { label: "Closed",    icon: "⚪" },
 };
 
 function MasterRiskReviewPanel({ reportId, onRegenerateWithEvidence }) {
@@ -2160,9 +2159,6 @@ function App() {
               reportMarkdown={[agentReports.audit_planning_agent?.content, agentReports.fs_review_agent?.content]
                 .filter(Boolean)
                 .join("\n\n---\n\n")}
-              reportId={selectedReportId}
-              auditPlanningMarkdown={agentReports.audit_planning_agent?.content}
-              fsReviewMarkdown={agentReports.fs_review_agent?.content}
               onUpdateProject={(updates) =>
                 setSelectedProjectItem((prev) => ({ ...prev, ...updates }))
               }

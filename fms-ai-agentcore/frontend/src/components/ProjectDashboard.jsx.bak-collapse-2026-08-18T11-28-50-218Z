@@ -120,12 +120,6 @@ function ProjectDashboard({ project, reportMarkdown, onUpdateProject, reportId, 
 
   const [riskReviewStatuses, setRiskReviewStatuses] = useState({});
   const [riskReviewLoading, setRiskReviewLoading] = useState(false);
-  const [showRiskReviewDetails, setShowRiskReviewDetails] = useState(false);
-
-  function truncateRiskArea(text, max = 90) {
-    if (!text || text.length <= max) return text;
-    return text.slice(0, max).trim() + "…";
-  }
 
   useEffect(() => {
     if (!reportId || taggedRiskRows.length === 0) {
@@ -344,30 +338,22 @@ function ProjectDashboard({ project, reportMarkdown, onUpdateProject, reportId, 
                     </span>
                   ))}
                 </div>
-                <button
-                  className="pdb-risk-review-toggle"
-                  onClick={() => setShowRiskReviewDetails((v) => !v)}
-                >
-                  {showRiskReviewDetails ? "▲ Hide full list" : `▼ Show all ${taggedRiskRows.length} risks`}
-                </button>
-                {showRiskReviewDetails && (
-                  <ul className="pdb-risk-review-list">
-                    {taggedRiskRows.map((r, i) => {
-                      const key = buildDashboardRiskKey(r.area, r.agentId);
-                      const statusValue = riskReviewStatuses[key]?.status || "open";
-                      const meta = RISK_REVIEW_STATUS_META[statusValue] || RISK_REVIEW_STATUS_META.open;
-                      const customText = riskReviewStatuses[key]?.customStatusText;
-                      return (
-                        <li key={i} className="pdb-risk-review-item">
-                          <span className="pdb-risk-review-area" title={r.area}>{truncateRiskArea(r.area)}</span>
-                          <span className="pdb-risk-review-status-badge">
-                            {meta.icon} {statusValue === "other" && customText ? customText : meta.label}
-                          </span>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                )}
+                <ul className="pdb-risk-review-list">
+                  {taggedRiskRows.map((r, i) => {
+                    const key = buildDashboardRiskKey(r.area, r.agentId);
+                    const statusValue = riskReviewStatuses[key]?.status || "open";
+                    const meta = RISK_REVIEW_STATUS_META[statusValue] || RISK_REVIEW_STATUS_META.open;
+                    const customText = riskReviewStatuses[key]?.customStatusText;
+                    return (
+                      <li key={i} className="pdb-risk-review-item">
+                        <span className="pdb-risk-review-area">{r.area}</span>
+                        <span className="pdb-risk-review-status-badge">
+                          {meta.icon} {statusValue === "other" && customText ? customText : meta.label}
+                        </span>
+                      </li>
+                    );
+                  })}
+                </ul>
               </>
             )}
           </div>

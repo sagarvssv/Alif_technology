@@ -148,6 +148,7 @@ def run_agent(payload):
             report_context=context_summary,
             kb_context=kb_context,
             citation_details=citation_details,
+            document_count=len(report_ids),
         )
 
     elif is_improve_request(user_message):
@@ -346,6 +347,25 @@ LANGUAGE RULES:
   Fabrication means inventing a specific financial conclusion (a ratio
   value, a balance issue, a classification judgment) the document
   gives no evidence for either way.
+- If more than one document is provided in the context below, treat any
+  document beyond the first as supporting evidence submitted by
+  management in response to a previously identified finding. Assess how
+  strongly it addresses that specific finding, and grade your response
+  into exactly one of three tiers:
+  1. FULLY RESOLVES — the evidence directly and completely satisfies
+     the finding (e.g. a signed related-party confirmation letter
+     matching the balance and terms). Move the Risk Rating down
+     significantly (e.g. High -> Low), and note what was confirmed.
+  2. PARTIALLY CORROBORATES — the evidence is genuinely relevant and
+     supports part of the finding, but does not fully close every
+     element of it (e.g. a bank confirmation shows real assets and
+     liquidity, supporting recoverability, but doesn't confirm exact
+     terms). Move the Risk Rating down ONE step (e.g. High -> Medium,
+     or Medium -> Low), and explicitly note what remains outstanding.
+  3. NOT RELEVANT — the evidence does not address this finding at all.
+     Leave the Risk Rating and reasoning completely unchanged.
+  Do not skip straight from High to Low unless tier 1 is clearly met.
+  Never invent tier 1 or 2 for evidence that is actually tier 3.
 
 FORMAT RULES:
 - Use markdown tables where requested.
@@ -355,11 +375,23 @@ FORMAT RULES:
 """
 
 
-def combined_prompt(user_message, report_context, kb_context, citation_details):
+def combined_prompt(user_message, report_context, kb_context, citation_details, document_count=1):
+    multi_doc_note = ""
+    if document_count and document_count > 1:
+        multi_doc_note = """
+
+NOTE: More than one document has been provided in the context above. The
+FIRST document is the primary financial record being reviewed. Any
+document beyond the first should be treated as supporting evidence
+submitted by management — most commonly, evidence submitted in response
+to a previously identified finding. Apply this when writing the
+Findings tables below.
+"""
+
     return f"""
 Financial statement context:
 {report_context}
-
+{multi_doc_note}
 Knowledge Base:
 {kb_context or "None."}
 
@@ -451,6 +483,9 @@ RULES THAT APPLY TO EVERY TABLE ABOVE:
   High/Medium/Low rating for a conclusion the document gives no basis for.
 - Always use the exact phrase "To Be Assessed" — never "N/A" or any
   other wording — so it is handled consistently.
+- If more than one document is provided, apply the three-tier evidence
+  grading described above (fully resolves / partially corroborates /
+  not relevant) — do not just fully resolve or fully ignore evidence.
 - If a function genuinely has zero findings (nothing wrong and nothing
   missing in that area), include exactly one row stating
   "No issues identified in this area." with Risk Rating "Low" instead
@@ -464,6 +499,8 @@ Write one short paragraph (3-4 sentences). Cover:
 - The overall opinion in plain terms, and how many issues were found.
 - The single most important next step for management (usually:
   prepare and submit full IFRS financial statements).
+- If supporting evidence was provided and resolved any findings, briefly
+  mention which ones and why.
 Do not repeat the tables above. Write this as plain narrative text.
 
 Do not write anything after the last section.
@@ -494,7 +531,7 @@ def ensure_all_sections_present(answer):
 
 
 def generate_complete_fs_review_output(
-    invoke_claude, user_message, report_context, kb_context, citation_details,
+    invoke_claude, user_message, report_context, kb_context, citation_details, document_count=1,
 ):
     try:
         result = invoke_claude(
@@ -504,6 +541,7 @@ def generate_complete_fs_review_output(
                 report_context=report_context,
                 kb_context=kb_context,
                 citation_details=citation_details,
+                document_count=document_count,
             ),
             max_tokens=2500,
             temperature=0,

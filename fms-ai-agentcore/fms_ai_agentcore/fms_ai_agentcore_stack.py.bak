@@ -306,7 +306,7 @@ class FmsAiAgentcoreStack(Stack):
             description="API to fetch generated financial audit reports",
             default_cors_preflight_options=apigateway.CorsOptions(
                 allow_origins=apigateway.Cors.ALL_ORIGINS,
-                allow_methods=["GET", "POST", "PUT", "OPTIONS"],
+                allow_methods=["GET", "POST", "OPTIONS"],
                 allow_headers=[
                     "Content-Type",
                     "Authorization",
@@ -385,72 +385,6 @@ class FmsAiAgentcoreStack(Stack):
             "POST",
             apigateway.LambdaIntegration(upload_url_lambda),
         )
-
-        # ══════════════════════════════════════════════════════════════
-        # ── ADD-ON: Risk Review & Resolution Workflow ──────────────────
-        # New resources only. Nothing above this block was modified.
-        # Lets auditors attach supporting documents to a specific
-        # identified risk, enter review/response/justification comments,
-        # and update/track that risk's status (open / in_review /
-        # resolved / closed) — answering the client's request directly.
-        # ══════════════════════════════════════════════════════════════
-
-        risk_reviews_table = dynamodb.Table(
-            self,
-            "FmsRiskReviewsTable",
-            partition_key=dynamodb.Attribute(
-                name="risk_key",
-                type=dynamodb.AttributeType.STRING,
-            ),
-            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
-            removal_policy=RemovalPolicy.RETAIN,
-        )
-
-        risk_review_lambda = _lambda.Function(
-            self,
-            "RiskReviewLambda",
-            runtime=_lambda.Runtime.PYTHON_3_12,
-            handler="app.lambda_handler",
-            code=_lambda.Code.from_asset("lambda/risk_review"),
-            timeout=Duration.seconds(30),
-            memory_size=512,
-            environment={
-                "RISK_REVIEWS_TABLE": risk_reviews_table.table_name,
-                "ATTACHMENTS_BUCKET": client_documents_bucket.bucket_name,
-            },
-        )
-
-        risk_reviews_table.grant_read_write_data(risk_review_lambda)
-        client_documents_bucket.grant_put(risk_review_lambda)
-        client_documents_bucket.grant_read(risk_review_lambda)
-
-        risks_resource = api.root.add_resource("risks")
-        risk_item_resource = risks_resource.add_resource("{riskKey}")
-
-        risk_item_resource.add_method(
-            "GET",
-            apigateway.LambdaIntegration(risk_review_lambda),
-        )
-        risk_item_resource.add_method(
-            "PUT",
-            apigateway.LambdaIntegration(risk_review_lambda),
-        )
-
-        risk_attachment_url_resource = risk_item_resource.add_resource("attachment-url")
-        risk_attachment_url_resource.add_method(
-            "POST",
-            apigateway.LambdaIntegration(risk_review_lambda),
-        )
-
-        CfnOutput(
-            self,
-            "RiskReviewApiUrl",
-            value=f"{api.url}risks/{{riskKey}}",
-        )
-
-        # ══════════════════════════════════════════════════════════════
-        # ── END ADD-ON ───────────────────────────────────────────────
-        # ══════════════════════════════════════════════════════════════
 
         CfnOutput(
             self,

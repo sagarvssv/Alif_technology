@@ -26,7 +26,6 @@ const VIEW_PROJECT_DASHBOARD = "project_dashboard";
 const VIEW_PROJECT_HISTORY = "project_history";
 const VIEW_PROJECT_FILES = "project_files";
 const VIEW_MASTER_AGENT = "master_agent";
-const VIEW_RISK_REVIEW = "risk_review";
 
 const SUB_AGENTS = [
   {
@@ -55,308 +54,6 @@ function emptyAgentReportState() {
     audit_planning_agent: { content: "", preGenerated: null, preGenerating: false, reportId: null },
     fs_review_agent:      { content: "", preGenerated: null, preGenerating: false, reportId: null },
   };
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// RISK REVIEW & RESOLUTION — shared across both agents (ADD-ON)
-// ═══════════════════════════════════════════════════════════════════
-
-const RISK_API = (riskKey) => `${API_BASE_URL}/risks/${encodeURIComponent(riskKey)}`;
-const EVIDENCE_POLL_INTERVAL_MS = 4000;
-const EVIDENCE_MAX_POLL_ATTEMPTS = 45;
-
-function buildDocKey(reportId) {
-  return `${reportId || "no-report"}::__document__`;
-}
-
-function getReviewerName() {
-  try { return localStorage.getItem("alif_reviewer_name") || ""; }
-  catch { return ""; }
-}
-
-function setReviewerNameStorage(name) {
-  try { localStorage.setItem("alif_reviewer_name", name); } catch {}
-}
-
-const RISK_STATUS_LABELS = {
-  open:            { label: "Open",             icon: "🔴" },
-  in_process:      { label: "In Process",       icon: "🟡" },
-  review:          { label: "Review",           icon: "🔵" },
-  closed_resolved: { label: "Closed / Resolved", icon: "✅" },
-  other:           { label: "Other",            icon: "⚪" },
-};
-
-function MasterRiskReviewPanel({ reportId, onRegenerateWithEvidence }) {
-  const docKey = buildDocKey(reportId);
-
-  const [expanded, setExpanded]           = useState(false);
-  const [review, setReview]               = useState(null);
-  const [reviewLoading, setReviewLoading] = useState(true);
-  const [reviewError, setReviewError]     = useState("");
-  const [newComment, setNewComment]       = useState("");
-  const [reviewerName, setReviewerNameState] = useState(getReviewerName());
-  const [saving, setSaving]               = useState(false);
-  const [savedConfirmation, setSavedConfirmation] = useState(false);
-  const [uploading, setUploading]         = useState(false);
-  const [uploadStage, setUploadStage]     = useState("");
-
-  useEffect(() => {
-    if (!expanded || !reportId) return;
-    let cancelled = false;
-    setReviewLoading(true);
-    setReviewError("");
-    fetch(RISK_API(docKey))
-      .then((res) => res.json())
-      .then((data) => { if (!cancelled) setReview(data); })
-      .catch(() => { if (!cancelled) setReviewError("Could not load review status."); })
-      .finally(() => { if (!cancelled) setReviewLoading(false); });
-    return () => { cancelled = true; };
-  }, [expanded, docKey, reportId]);
-
-  async function saveUpdate(patch, { showConfirmation = false } = {}) {
-    setSaving(true);
-    setReviewError("");
-    setSavedConfirmation(false);
-    try {
-      const res = await fetch(RISK_API(docKey), {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ changedBy: reviewerName || "Unnamed reviewer", ...patch }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to save.");
-      setReview(data);
-      if (showConfirmation) {
-        setSavedConfirmation(true);
-        setTimeout(() => setSavedConfirmation(false), 2500);
-      }
-      return data;
-    } catch (err) {
-      setReviewError(err.message || "Failed to save your update. Please try again.");
-      return null;
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  function handleStatusChange(e) {
-    saveUpdate({ status: e.target.value });
-  }
-
-  function handleAddComment() {
-    const text = newComment.trim();
-    if (!text) return;
-    saveUpdate({ newComment: { author: reviewerName || "Unnamed reviewer", text } });
-    setNewComment("");
-  }
-
-  function handleReviewerNameBlur() {
-    setReviewerNameStorage(reviewerName);
-  }
-
-  async function handleManualSave() {
-    setReviewerNameStorage(reviewerName);
-    const pendingComment = newComment.trim();
-    const patch = { status: review?.status || "open" };
-    if (pendingComment) {
-      patch.newComment = { author: reviewerName || "Unnamed reviewer", text: pendingComment };
-    }
-    const result = await saveUpdate(patch, { showConfirmation: true });
-    if (result && pendingComment) setNewComment("");
-  }
-
-  async function waitForEvidenceDocument(fileName, existingIds) {
-    const normalize = (n) => (n || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-    for (let attempt = 0; attempt < EVIDENCE_MAX_POLL_ATTEMPTS; attempt++) {
-      await sleep(EVIDENCE_POLL_INTERVAL_MS);
-      setUploadStage(`Extracting text from evidence document… (${attempt + 1})`);
-      try {
-        const res  = await fetch(`${DOCUMENTS_API}?portal=user`);
-        const data = await res.json();
-        const list = data.reports || data.documents || data.items || [];
-        const match = list.find((doc) => {
-          const id = getReportId(doc);
-          if (!id || existingIds.has(id)) return false;
-          const isDone = ["COMPLETED", "READY"].includes(doc.status || doc.processingStatus);
-          if (!isDone) return false;
-          const name = normalize(getReportName(doc));
-          return name && name.endsWith(normalize(fileName));
-        });
-        if (match) return getReportId(match);
-      } catch {}
-    }
-    throw new Error("Evidence document took too long to process. Please try again.");
-  }
-
-  async function handleAttachEvidence(e) {
-    const file = e.target.files?.[0];
-    if (!file || !reportId) return;
-    setUploading(true);
-    setReviewError("");
-    setUploadStage("Uploading evidence document…");
-    try {
-      let existingIds = new Set();
-      try {
-        const snapRes  = await fetch(`${DOCUMENTS_API}?portal=user`);
-        const snapData = await snapRes.json();
-        const snapList = snapData.reports || snapData.documents || snapData.items || [];
-        existingIds = new Set(snapList.map(getReportId).filter(Boolean));
-      } catch {}
-
-      const urlRes = await fetch(UPLOAD_URL_API, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          file_name: file.name,
-          content_type: file.type || "application/pdf",
-        }),
-      });
-      const urlData   = await urlRes.json();
-      const uploadUrl = urlData.uploadUrl || urlData.upload_url || urlData.url || urlData.presignedUrl;
-      if (!uploadUrl) throw new Error("Could not get an upload link for the evidence document.");
-
-      const putRes = await fetch(uploadUrl, {
-        method: "PUT",
-        headers: { "Content-Type": file.type || "application/pdf" },
-        body: file,
-      });
-      if (!putRes.ok) throw new Error("Uploading the evidence document to storage failed.");
-
-      const evidenceReportId = await waitForEvidenceDocument(file.name, existingIds);
-
-      await saveUpdate({ newAttachment: { fileName: file.name, s3Key: evidenceReportId } });
-
-      setUploadStage("Re-analysing risks for both agents with the new evidence…");
-      await onRegenerateWithEvidence(reportId, evidenceReportId);
-
-      await saveUpdate({
-        newComment: {
-          author: "System",
-          text: `Both agents re-analysed using supporting document "${file.name}". Any risk directly addressed by this evidence may have been updated.`,
-        },
-      });
-    } catch (err) {
-      setReviewError(err.message || "Failed to process the evidence document. Please try again.");
-    } finally {
-      setUploading(false);
-      setUploadStage("");
-      e.target.value = "";
-    }
-  }
-
-  if (!reportId) return null;
-
-  return (
-    <div className="risk-review-panel">
-      <button className="risk-review-toggle-btn" onClick={() => setExpanded((v) => !v)}>
-        🗂️ Risk Review &amp; Resolution (shared across both agents) {expanded ? "▲" : "▼"}
-      </button>
-
-      {expanded && (
-        <div className="risk-review-panel-body">
-          {reviewLoading ? (
-            <div className="single-section-body">Loading review status…</div>
-          ) : (
-            <>
-              {reviewError && <div className="risk-review-error">⚠️ {reviewError}</div>}
-
-              <div className="risk-review-field">
-                <label className="risk-review-field-label">Your name (remembered on this device)</label>
-                <input
-                  type="text"
-                  className="risk-review-input"
-                  placeholder="e.g. Hasini"
-                  value={reviewerName}
-                  onChange={(e) => setReviewerNameState(e.target.value)}
-                  onBlur={handleReviewerNameBlur}
-                />
-              </div>
-
-              <div className="risk-review-field">
-                <label className="risk-review-field-label">Overall review status</label>
-                <select
-                  className="risk-review-select"
-                  value={review?.status || "open"}
-                  onChange={handleStatusChange}
-                  disabled={saving}
-                >
-                  {Object.entries(RISK_STATUS_LABELS).map(([value, { label, icon }]) => (
-                    <option key={value} value={value}>{icon} {label}</option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="risk-review-field">
-                <label className="risk-review-field-label">
-                  Supporting documents ({review?.attachments?.length || 0})
-                </label>
-                <p className="risk-review-hint">
-                  Uploading evidence here re-runs BOTH the Audit Planning and Financial
-                  Statement Review agents. Risks the evidence directly addresses may
-                  update; unrelated risks are left unchanged.
-                </p>
-                {review?.attachments?.length > 0 && (
-                  <ul className="risk-review-attachment-list">
-                    {review.attachments.map((a, i) => (
-                      <li key={i} className="risk-review-attachment-item">
-                        📎 {a.fileName}
-                        <span className="risk-review-attachment-meta">
-                          — {a.uploadedBy || "unknown"}, {new Date(a.uploadedAt).toLocaleDateString()}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                <label className="risk-review-upload-btn">
-                  <input type="file" onChange={handleAttachEvidence} disabled={uploading} />
-                  {uploading ? (uploadStage || "Processing…") : "➕ Attach supporting evidence"}
-                </label>
-              </div>
-
-              <div className="risk-review-field">
-                <label className="risk-review-field-label">
-                  Comments &amp; justification ({review?.comments?.length || 0})
-                </label>
-                {review?.comments?.length > 0 && (
-                  <div className="risk-review-comment-list">
-                    {review.comments.map((c, i) => (
-                      <div key={i} className="risk-review-comment">
-                        <div className="risk-review-comment-meta">
-                          <strong>{c.author}</strong> · {new Date(c.timestamp).toLocaleString()}
-                        </div>
-                        <div className="risk-review-comment-text">{c.text}</div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                <textarea
-                  className="risk-review-textarea"
-                  placeholder="Add your review, response, or justification…"
-                  value={newComment}
-                  onChange={(e) => setNewComment(e.target.value)}
-                  rows={3}
-                />
-                <button
-                  className="risk-review-comment-btn"
-                  onClick={handleAddComment}
-                  disabled={saving || !newComment.trim()}
-                >
-                  {saving ? "Saving…" : "Add comment"}
-                </button>
-              </div>
-
-              <div className="risk-review-save-row">
-                <button className="risk-review-save-btn" onClick={handleManualSave} disabled={saving}>
-                  {saving ? "Saving…" : "💾 Save"}
-                </button>
-                {savedConfirmation && <span className="risk-review-saved-note">✅ Saved</span>}
-              </div>
-            </>
-          )}
-        </div>
-      )}
-    </div>
-  );
 }
 
 function formatDate(value) {
@@ -650,7 +347,7 @@ function FinancialIcon() {
 }
 
 // ─── History Entry Detail Modal ────────────────────────────────────────
-// Opened by clicking any line in the Alif Technologies — Project History list. Shows the full
+// Opened by clicking any line in the Project History list. Shows the full
 // note text, a human-readable action type, and the exact date/time —
 // everything currently tracked for a history entry.
 function HistoryDetailModal({ entry, onClose }) {
@@ -914,10 +611,9 @@ function App() {
   // Each uploaded document's Master Agent / Audit Planning / FS Review
   // results are generated and cached completely independently, keyed by
   // reportId — uploading abc.pdf and xyz.pdf never mixes their content.
-  async function generateAgentReportInBackground(reportId, agentId, generateMessage, extraReportIds = []) {
+  async function generateAgentReportInBackground(reportId, agentId, generateMessage) {
     updateDocAgentReport(reportId, agentId, { preGenerating: true, preGenerated: null });
     try {
-      const allReportIds = [reportId, ...extraReportIds];
       const res = await fetch(CHAT_API, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -926,7 +622,6 @@ function App() {
           question:      generateMessage,
           sessionId:     `bg-${agentId}-${Date.now()}`,
           reportId,
-          reportIds:     allReportIds,
           selectedAgent: agentId,
           agent:         agentId,
           generalMode:   false,
@@ -934,6 +629,7 @@ function App() {
         }),
       });
       const data = await res.json();
+
       if (data.status === "processing" && data.jobId) {
         for (let attempt = 0; attempt < 60; attempt++) {
           await sleep(2500);
@@ -956,13 +652,6 @@ function App() {
     } finally {
       updateDocAgentReport(reportId, agentId, { preGenerating: false });
     }
-  }
-
-  async function regenerateBothAgentsWithEvidence(reportId, evidenceReportId) {
-    await Promise.all([
-      generateAgentReportInBackground(reportId, "audit_planning_agent", AGENT_GENERATE_MESSAGES.audit_planning_agent, [evidenceReportId]),
-      generateAgentReportInBackground(reportId, "fs_review_agent", AGENT_GENERATE_MESSAGES.fs_review_agent, [evidenceReportId]),
-    ]);
   }
 
   async function fetchReports() {
@@ -1499,7 +1188,7 @@ function App() {
     container.innerHTML = `
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:18px;">
         <div style="width:34px;height:34px;border-radius:8px;background:linear-gradient(135deg,#1a56db,#06b6d4);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:13px;">AT</div>
-        <div style="font-weight:800;font-size:15px;">Project History</div>
+        <div style="font-weight:800;font-size:15px;">Alif Technologies — Project History</div>
       </div>
 
       <div style="border-radius:12px;overflow:hidden;border:1px solid #e2e8f0;margin-bottom:22px;">
@@ -1939,22 +1628,6 @@ function App() {
           </div>
         )}
 
-        {view === VIEW_RISK_REVIEW && (
-          <div className="chatbot-view">
-            <div className="chatbot-nav-bar">
-              <button className="back-nav-btn" onClick={() => goBack(VIEW_MASTER_AGENT)}>
-                ← Back to Master Agent
-              </button>
-            </div>
-            <div className="risk-review-screen-body">
-            <MasterRiskReviewPanel
-              reportId={selectedReportId}
-              onRegenerateWithEvidence={regenerateBothAgentsWithEvidence}
-            />
-          </div>
-          </div>
-        )}
-
         {/* MANAGER CHAT */}
         {view === VIEW_MANAGER_CHAT && (
           <div className="chatbot-view">
@@ -1978,7 +1651,7 @@ function App() {
               </button>
             </div>
             {selectedReportId ? (
-                            <MasterAgentOverview
+              <MasterAgentOverview
                 agentReports={agentReports}
                 reportName={selectedReport ? getReportName(selectedReport) : ""}
                 onViewDetails={(agentId) => {
@@ -2160,9 +1833,6 @@ function App() {
               reportMarkdown={[agentReports.audit_planning_agent?.content, agentReports.fs_review_agent?.content]
                 .filter(Boolean)
                 .join("\n\n---\n\n")}
-              reportId={selectedReportId}
-              auditPlanningMarkdown={agentReports.audit_planning_agent?.content}
-              fsReviewMarkdown={agentReports.fs_review_agent?.content}
               onUpdateProject={(updates) =>
                 setSelectedProjectItem((prev) => ({ ...prev, ...updates }))
               }

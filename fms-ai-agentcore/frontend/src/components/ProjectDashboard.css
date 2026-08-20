@@ -258,3 +258,20 @@
   .pdb-view { padding: 18px; }
   .pdb-risk-list li { grid-template-columns: 1fr; gap: 6px; }
 }
+/* ─── Better spacing for Risk Review Status list items (ADD-ON) ────── */
+.pdb-risk-review-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.pdb-risk-review-area {
+  flex: 1;
+  margin-right: 12px;
+}
+
+.pdb-risk-review-status-badge {
+  flex-shrink: 0;
+  white-space: nowrap;
+}

@@ -79,11 +79,10 @@ function setReviewerNameStorage(name) {
 }
 
 const RISK_STATUS_LABELS = {
-  open:            { label: "Open",             icon: "🔴" },
-  in_process:      { label: "In Process",       icon: "🟡" },
-  review:          { label: "Review",           icon: "🔵" },
-  closed_resolved: { label: "Closed / Resolved", icon: "✅" },
-  other:           { label: "Other",            icon: "⚪" },
+  open:      { label: "Open",      icon: "🔴" },
+  in_review: { label: "In Review", icon: "🟡" },
+  resolved:  { label: "Resolved",  icon: "✅" },
+  closed:    { label: "Closed",    icon: "⚪" },
 };
 
 function MasterRiskReviewPanel({ reportId, onRegenerateWithEvidence }) {
@@ -650,7 +649,7 @@ function FinancialIcon() {
 }
 
 // ─── History Entry Detail Modal ────────────────────────────────────────
-// Opened by clicking any line in the Alif Technologies — Project History list. Shows the full
+// Opened by clicking any line in the Project History list. Shows the full
 // note text, a human-readable action type, and the exact date/time —
 // everything currently tracked for a history entry.
 function HistoryDetailModal({ entry, onClose }) {
@@ -1499,7 +1498,7 @@ function App() {
     container.innerHTML = `
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:18px;">
         <div style="width:34px;height:34px;border-radius:8px;background:linear-gradient(135deg,#1a56db,#06b6d4);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:13px;">AT</div>
-        <div style="font-weight:800;font-size:15px;">Project History</div>
+        <div style="font-weight:800;font-size:15px;">Alif Technologies — Project History</div>
       </div>
 
       <div style="border-radius:12px;overflow:hidden;border:1px solid #e2e8f0;margin-bottom:22px;">
@@ -1687,6 +1686,14 @@ function App() {
                 )}
               </button>
             ))}
+
+          <button
+            className={`sidebar-agent-btn ${view === VIEW_RISK_REVIEW ? "sidebar-agent-active" : ""}`}
+            onClick={() => navigateTo(VIEW_RISK_REVIEW)}
+          >
+            <span className="sidebar-agent-icon">🗂️</span>
+            <span className="sidebar-agent-label">Risk Review & Resolution</span>
+          </button>
           </div>
         )}
 
@@ -1946,12 +1953,10 @@ function App() {
                 ← Back to Master Agent
               </button>
             </div>
-            <div className="risk-review-screen-body">
             <MasterRiskReviewPanel
               reportId={selectedReportId}
               onRegenerateWithEvidence={regenerateBothAgentsWithEvidence}
             />
-          </div>
           </div>
         )}
 
@@ -2160,9 +2165,6 @@ function App() {
               reportMarkdown={[agentReports.audit_planning_agent?.content, agentReports.fs_review_agent?.content]
                 .filter(Boolean)
                 .join("\n\n---\n\n")}
-              reportId={selectedReportId}
-              auditPlanningMarkdown={agentReports.audit_planning_agent?.content}
-              fsReviewMarkdown={agentReports.fs_review_agent?.content}
               onUpdateProject={(updates) =>
                 setSelectedProjectItem((prev) => ({ ...prev, ...updates }))
               }

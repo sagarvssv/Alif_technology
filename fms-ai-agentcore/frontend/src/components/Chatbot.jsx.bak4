@@ -12,24 +12,44 @@ const CHAT_STATUS_API = (jobId) => `${API_BASE_URL}/chat/status/${jobId}`;
 const POLL_INTERVAL_MS = 1000;
 const MAX_POLL_ATTEMPTS = 60;
 
-// ─── Per-Risk Review & Supporting Evidence (ADD-ON) ────────────────────
+// ─── Risk Review & Resolution (ADD-ON) ─────────────────────────────────
+// New endpoints only — nothing above/below this touches the existing
+// /chat, /documents, or /upload-url routes.
 const RISK_API = (riskKey) => `${API_BASE_URL}/risks/${encodeURIComponent(riskKey)}`;
-const RISK_ATTACHMENT_URL_API = `${API_BASE_URL}/upload-url`;
-const RISK_DOCUMENTS_API = `${API_BASE_URL}/documents`;
-const RISK_EVIDENCE_POLL_INTERVAL_MS = 4000;
-const RISK_EVIDENCE_MAX_POLL_ATTEMPTS = 45;
+const RISK_ATTACHMENT_URL_API = (riskKey) => `${API_BASE_URL}/risks/${encodeURIComponent(riskKey)}/attachment-url`;
 
+// Builds a stable identifier for a specific risk finding, so the same
+// finding on the same document/agent stays trackable across sessions
+// (as long as the AI doesn't reword the risk area name on regeneration).
 function buildRiskKey(reportId, agentId, area) {
   const safeArea = (area || "").trim().toLowerCase().replace(/\s+/g, "-");
   return `${reportId || "no-report"}::${agentId || "no-agent"}::${safeArea}`;
 }
 
-const RISK_ITEM_STATUS_LABELS = {
-  open:            { label: "Open",             icon: "🔴" },
-  in_process:      { label: "In Process",       icon: "🟡" },
-  review:          { label: "Review",           icon: "🔵" },
-  closed_resolved: { label: "Closed / Resolved", icon: "✅" },
-  other:           { label: "Other",            icon: "⚪" },
+// Attachments apply to the WHOLE report for this document/agent, not to
+// one individual risk — a single supporting document (e.g. a full stock
+// count or receivables ageing report) can be evidence for several risks
+// at once, so uploading it once should make it visible everywhere for
+// this report, not force a duplicate upload per risk card.
+function buildDocKey(reportId, agentId) {
+  return `${reportId || "no-report"}::${agentId || "no-agent"}::__document__`;
+}
+
+function getReviewerName() {
+  try {
+    return localStorage.getItem("alif_reviewer_name") || "";
+  } catch { return ""; }
+}
+
+function setReviewerName(name) {
+  try { localStorage.setItem("alif_reviewer_name", name); } catch {}
+}
+
+const STATUS_LABELS = {
+  open:       { label: "Open",       icon: "🔴" },
+  in_review:  { label: "In Review",  icon: "🟡" },
+  resolved:   { label: "Resolved",   icon: "✅" },
+  closed:     { label: "Closed",     icon: "⚪" },
 };
 
 const SECTION_COLOURS = {
@@ -41,12 +61,6 @@ const SECTION_COLOURS = {
   "Staffing Recommendations":   { bg: "#f0f9ff", border: "#0891b2", text: "#155e75", icon: "👥" },
   "Audit Planning Deliverables":{ bg: "#f8fafc", border: "#475569", text: "#1e293b", icon: "📊" },
 };
-
-// Ordered from lowest to highest risk. Used for deterministic stepping —
-// the AI is never asked to pick a new level itself, only to answer two
-// yes/no questions; the level change always comes from this fixed table,
-// so the same verdict always produces the same outcome, every time.
-const RISK_LEVEL_ORDER = ["Low", "Low-Medium", "Medium", "Medium-High", "High"];
 
 const RISK_LEVELS = {
   "high":            { pct: 90, bg: "#fee2e2", text: "#991b1b", bar: "#ef4444", needsGap: true  },
@@ -146,18 +160,6 @@ function isUnassessedRisk(raw = "") {
   return (raw || "").toLowerCase().trim() === "to be assessed";
 }
 
-// Deterministic level stepping. Same currentLabel + same steps ALWAYS
-// produces the same result — no AI involved in this calculation at all.
-function stepDownRiskLevel(currentLabel, steps) {
-  const normalized = (currentLabel || "").trim();
-  let index = RISK_LEVEL_ORDER.findIndex(
-    (l) => l.toLowerCase() === normalized.toLowerCase()
-  );
-  if (index === -1) index = RISK_LEVEL_ORDER.length - 1; // unknown/"To Be Assessed" -> treat as High for stepping purposes
-  const newIndex = Math.max(0, index - steps);
-  return RISK_LEVEL_ORDER[newIndex];
-}
-
 function extractText(node) {
   if (!node && node !== 0) return "";
   if (typeof node === "string" || typeof node === "number") return String(node);
@@ -184,6 +186,16 @@ function parseRiskRows(markdown = "") {
     }
     const cfg = getRisk(riskRaw);
     if (!cfg) continue;
+
+    // "To Be Assessed" rows mean the agent found no evidence either way in
+    // the uploaded document — this is NOT a confirmed finding, so it must
+    // not be counted as either a risk needing attention or an improved /
+    // low-risk area. Only genuinely-rated rows (High/Medium-High/Medium/
+    // Low-Medium/Low) belong in the Gap Analysis breakdown below. This
+    // keeps "Needs Attention" / "Improved" meaningful, and means the
+    // whole Gap Analysis panel simply won't render at all when a document
+    // produced zero genuine findings — which is correct, since there's
+    // nothing genuine to show.
     if (isUnassessedRisk(riskRaw)) continue;
 
     const item = {
@@ -221,169 +233,49 @@ function createSessionId() {
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
-// ── Table row helpers, shared by the row-rewrite logic below ──────────
-function isTableRowLine(line) {
-  if (!line.trim().startsWith("|")) return false;
-  if (/^\|[\s|:-]+\|/.test(line.trim())) return false;
-  const cells = line.split("|").map((c) => c.trim()).filter(Boolean);
-  return cells.length >= 3;
-}
-
-function getRowArea(line) {
-  const cells = line.split("|").map((c) => c.trim()).filter(Boolean);
-  return (cells[0] || "").trim().toLowerCase();
-}
-
-function findTableRowLineIndex(lines, targetArea) {
-  const normalize = (s) => (s || "").trim().toLowerCase();
-  const target = normalize(targetArea);
-  for (let i = 0; i < lines.length; i++) {
-    if (!isTableRowLine(lines[i])) continue;
-    if (getRowArea(lines[i]) === target) return i;
-  }
-  return -1;
-}
-
-// FIX (Bug B): the old note strings applyRiskVerdictToReport used to
-// write are fixed and known, so any previous one can be safely stripped
-// before appending the current verdict's note — preventing old and new
-// notes from piling up together in the same cell.
-const KNOWN_VERDICT_NOTES = [
-  "Resolved by uploaded evidence — fully addresses the planned response.",
-  "Partially addressed by uploaded evidence — some items remain outstanding.",
-  "Note: the uploaded document does not appear related to this risk — no change made.",
-];
-
-// SPECIFIC-GAP FEATURE: notes are now built dynamically from the AI's
-// specifically_addressed / still_outstanding fields (see
-// buildVerdictNote below), so they can no longer be matched against a
-// small fixed list. Every note we write is prefixed with this marker so
-// it can always be found and stripped, regardless of its exact wording.
-const VERDICT_NOTE_MARKER = "🤖 Evidence check —";
-
-function stripPreviousVerdictNote(text) {
-  let cleaned = text;
-  // New marker-based notes (this version onward): cut everything from
-  // the marker to the end of the cell.
-  const markerIndex = cleaned.indexOf(`— ${VERDICT_NOTE_MARKER}`);
-  if (markerIndex !== -1) {
-    cleaned = cleaned.slice(0, markerIndex);
-  }
-  // Legacy fixed-string notes (rows saved before this version) — kept
-  // for backward compatibility with reports generated previously.
-  for (const note of KNOWN_VERDICT_NOTES) {
-    cleaned = cleaned.split(` — ${note}`).join("");
-  }
-  return cleaned.trim();
-}
-
-// SPECIFIC-GAP FEATURE: builds a note that names the concrete fact the
-// evidence confirmed and, if the risk isn't fully resolved, the concrete
-// gap that remains — instead of a generic "partially addressed" label.
-// Falls back to the old generic wording if the agent hasn't been
-// updated yet or returns these fields empty, so this stays compatible
-// with the currently deployed agent.
-function buildVerdictNote(verdict) {
-  if (!verdict.relevant) {
-    return "the uploaded document does not appear related to this risk — no change made.";
-  }
-
-  const addressed   = (verdict.specifically_addressed || "").trim();
-  const outstanding = (verdict.still_outstanding || "").trim();
-
-  if (verdict.resolves_risk) {
-    return addressed
-      ? `Resolved — confirmed: ${addressed}.`
-      : "Resolved by uploaded evidence — fully addresses the planned response.";
-  }
-
-  if (addressed && outstanding) {
-    return `Partially addressed — confirmed: ${addressed}. Still outstanding: ${outstanding}.`;
-  }
-  if (addressed) {
-    return `Partially addressed — confirmed: ${addressed}. Some items remain outstanding.`;
-  }
-  return "Partially addressed by uploaded evidence — some items remain outstanding.";
-}
-
-// ── Deterministic row rewrite ───────────────────────────────────────────
-// Directly edits ONE table row's risk-level cell (and appends a short
-// note to the last cell) using plain string manipulation — no AI
-// involved in producing the new text at all. This guarantees: (a) every
-// OTHER row in the report is byte-for-byte untouched, and (b) the same
-// verdict always produces the exact same row text.
-function rewriteRiskRow(line, newLevelLabel, noteText) {
-  // Raw split preserves the leading/trailing empty strings from a
-  // well-formed "| a | b | c | d |" row, so positions stay predictable.
-  const parts = line.split("|");
-  let riskCellIndex = -1;
-  for (let i = 1; i < parts.length - 1; i++) {
-    if (getRisk(parts[i].trim())) {
-      riskCellIndex = i;
-      break;
-    }
-  }
-  if (riskCellIndex !== -1) {
-    parts[riskCellIndex] = ` ${newLevelLabel} `;
-  }
-  // Append the note to the last real (non-empty-trailing) cell — this is
-  // always the "What the auditor will check" / Response column.
-  let lastRealIndex = parts.length - 2; // parts[len-1] is the trailing "" after the final pipe
-  if (lastRealIndex >= 1 && noteText) {
-    const existing = stripPreviousVerdictNote(parts[lastRealIndex].trim());
-    parts[lastRealIndex] = ` ${existing} — ${VERDICT_NOTE_MARKER} ${noteText} `;
-  }
-  return parts.join("|");
-}
-
-function applyRiskVerdictToReport(oldMarkdown, targetArea, verdict, currentLevelLabel) {
-  if (!oldMarkdown) return oldMarkdown;
-  const lines = oldMarkdown.split("\n");
-  const rowIndex = findTableRowLineIndex(lines, targetArea);
-  if (rowIndex === -1) return oldMarkdown;
-
-  let newLevelLabel = currentLevelLabel;
-
-  if (!verdict.relevant) {
-    newLevelLabel = currentLevelLabel; // unchanged
-  } else if (verdict.resolves_risk) {
-    newLevelLabel = stepDownRiskLevel(currentLevelLabel, 2);
-  } else {
-    newLevelLabel = stepDownRiskLevel(currentLevelLabel, 1);
-  }
-
-  const note = buildVerdictNote(verdict);
-  lines[rowIndex] = rewriteRiskRow(lines[rowIndex], newLevelLabel, note);
-  return lines.join("\n");
-}
-
 // ─── Item Modal with Solutions ────────────────────────────────────────
-function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onRiskEvidenceRegenerated }) {
+function ItemModal({ item, onClose, reportId, agentId }) {
   const [showSolutions, setShowSolutions] = useState(false);
   if (!item) return null;
   const cfg       = getRisk(item.riskRaw);
   const solutions = getRiskSolutions(item.area);
 
+  // ── Risk Review & Resolution state (ADD-ON) ──────────────────────────
+  // Status and comments are tracked PER RISK (riskKey) — a comment like
+  // "verified via physical count" belongs to one specific finding.
+  // Attachments are tracked at the DOCUMENT level (docKey) — a single
+  // supporting file (e.g. a full stock count) can be evidence for
+  // several risks at once, so it's shared across every risk card for
+  // this report instead of needing a separate upload each time.
   const riskKey = buildRiskKey(reportId, agentId, item.area);
+  const docKey  = buildDocKey(reportId, agentId);
+
   const [review, setReview]           = useState(null);
+  const [docReview, setDocReview]     = useState(null);
   const [reviewLoading, setReviewLoading] = useState(true);
   const [reviewError, setReviewError] = useState("");
+  const [newComment, setNewComment]   = useState("");
+  const [reviewerName, setReviewerNameState] = useState(getReviewerName());
   const [saving, setSaving]           = useState(false);
   const [uploading, setUploading]     = useState(false);
-  const [uploadStage, setUploadStage] = useState("");
-  const [lastVerdict, setLastVerdict] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
     setReviewLoading(true);
     setReviewError("");
-    fetch(RISK_API(riskKey))
-      .then((res) => res.json())
-      .then((data) => { if (!cancelled) setReview(data); })
-      .catch(() => { if (!cancelled) setReviewError("Could not load review status for this risk."); })
+    Promise.all([
+      fetch(RISK_API(riskKey)).then((res) => res.json()),
+      fetch(RISK_API(docKey)).then((res) => res.json()),
+    ])
+      .then(([riskData, docData]) => {
+        if (cancelled) return;
+        setReview(riskData);
+        setDocReview(docData);
+      })
+      .catch(() => { if (!cancelled) setReviewError("Could not load review status. You can still view the AI findings below."); })
       .finally(() => { if (!cancelled) setReviewLoading(false); });
     return () => { cancelled = true; };
-  }, [riskKey]);
+  }, [riskKey, docKey]);
 
   async function saveRiskUpdate(patch) {
     setSaving(true);
@@ -392,15 +284,32 @@ function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onR
       const res = await fetch(RISK_API(riskKey), {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(patch),
+        body: JSON.stringify({ changedBy: reviewerName || "Unnamed reviewer", ...patch }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to save.");
       setReview(data);
-      return data;
     } catch (err) {
       setReviewError(err.message || "Failed to save your update. Please try again.");
-      return null;
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function saveDocUpdate(patch) {
+    setSaving(true);
+    setReviewError("");
+    try {
+      const res = await fetch(RISK_API(docKey), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ changedBy: reviewerName || "Unnamed reviewer", ...patch }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to save.");
+      setDocReview(data);
+    } catch (err) {
+      setReviewError(err.message || "Failed to save your attachment. Please try again.");
     } finally {
       setSaving(false);
     }
@@ -410,213 +319,45 @@ function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onR
     saveRiskUpdate({ status: e.target.value });
   }
 
-  const [customStatusText, setCustomStatusText] = useState("");
-
-  useEffect(() => {
-    setCustomStatusText(review?.customStatusText || "");
-  }, [review?.customStatusText]);
-
-  function handleCustomStatusBlur() {
-    if (review?.status === "other") {
-      saveRiskUpdate({ status: "other", customStatusText });
-    }
-  }
-
-  const [newComment, setNewComment] = useState("");
-  const [savedConfirmation, setSavedConfirmation] = useState(false);
-
   function handleAddComment() {
     const text = newComment.trim();
     if (!text) return;
-    saveRiskUpdate({ newComment: { author: "User", text } });
+    saveRiskUpdate({ newComment: { author: reviewerName || "Unnamed reviewer", text } });
     setNewComment("");
   }
 
-  async function waitForRiskEvidenceDocument(fileName, existingIds) {
-    const normalize = (n) => (n || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-    for (let attempt = 0; attempt < RISK_EVIDENCE_MAX_POLL_ATTEMPTS; attempt++) {
-      await sleep(RISK_EVIDENCE_POLL_INTERVAL_MS);
-      setUploadStage(`Extracting text from document… (${attempt + 1})`);
-      try {
-        const res  = await fetch(`${RISK_DOCUMENTS_API}?portal=user`);
-        const data = await res.json();
-        const list = data.reports || data.documents || data.items || [];
-        const match = list.find((doc) => {
-          const id = doc.reportId || doc.documentId || doc.document_id || "";
-          if (!id || existingIds.has(id)) return false;
-          const isDone = ["COMPLETED", "READY"].includes(doc.status || doc.processingStatus);
-          if (!isDone) return false;
-          const name = normalize(doc.source_file || doc.sourceFile || doc.fileName || doc.file_name || "");
-          return name && name.endsWith(normalize(fileName));
-        });
-        if (match) return match.reportId || match.documentId || match.document_id;
-      } catch {}
-    }
-    throw new Error("Document took too long to process. Please try again.");
-  }
-
-  async function pollRelevanceJob(jobId) {
-    for (let attempt = 0; attempt < MAX_POLL_ATTEMPTS; attempt++) {
-      await sleep(POLL_INTERVAL_MS);
-      setUploadStage("Checking whether this evidence resolves the risk…");
-      let res;
-      try { res = await fetch(CHAT_STATUS_API(jobId)); } catch { continue; }
-      if (!res.ok && res.status !== 404) continue;
-      const data = await res.json();
-      if (data.status === "complete") return data;
-      if (data.status === "failed") throw new Error(data.error || "Relevance check failed.");
-    }
-    throw new Error("Relevance check is taking longer than expected. Please check back shortly.");
-  }
-
-  // ── Deterministic relevance check for ONE newly uploaded document ────
-  // Calls the agent's narrow relevanceCheck route (see agentcore
-  // audit_planning_agent/app.py) which returns { relevant, resolves_risk,
-  // reason, specifically_addressed, still_outstanding } — never a full
-  // report. The frontend then computes the new risk level itself via a
-  // fixed lookup table (stepDownRiskLevel) and edits ONLY this risk's
-  // table row directly.
-  //
-  // IMPORTANT FIX: every other call to CHAT_API in this codebase always
-  // includes non-empty "message" and "question" fields. The upstream
-  // Lambda chain validates this and returns 400 Bad Request if they are
-  // missing — this call previously omitted them, which was the root
-  // cause of the "risk not reducing" bug. They are included below even
-  // though the agent's relevanceCheck branch itself does not read them.
-  async function checkRelevanceAndApply(evidenceReportId) {
-    setUploadStage("Checking whether this evidence resolves the risk…");
-    const placeholderMessage = `Check evidence relevance for "${item.area}".`;
-    const chatRes = await fetch(CHAT_API, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        message: placeholderMessage,
-        question: placeholderMessage,
-        sessionId: `risk-relevance-${Date.now()}`,
-        reportId: evidenceReportId,
-        reportIds: [evidenceReportId],
-        selectedAgent: agentId,
-        agent: agentId,
-        generalMode: false,
-        general_mode: false,
-        relevanceCheck: {
-          riskArea: item.area,
-          riskDescription: item.description,
-          plannedResponse: item.response || "",
-        },
-      }),
-    });
-    const chatData = await chatRes.json();
-    if (!chatRes.ok && chatRes.status !== 202) {
-      throw new Error(chatData.message || chatData.error || `Relevance check request failed (${chatRes.status}).`);
-    }
-    let final = chatData;
-    if (chatData.status === "processing" && chatData.jobId) {
-      final = await pollRelevanceJob(chatData.jobId);
-    }
-    const rawAnswer = final.answer || final.response || final.message || "";
-    let verdict;
-    try {
-      verdict = JSON.parse(rawAnswer);
-    } catch {
-      verdict = {
-        relevant: false,
-        resolves_risk: false,
-        reason: "Could not read the assessment result.",
-        specifically_addressed: "",
-        still_outstanding: "",
-      };
-    }
-    setLastVerdict(verdict);
-
-    const mergedContent = applyRiskVerdictToReport(
-      currentReportContent,
-      item.area,
-      verdict,
-      item.riskRaw
-    );
-    onRiskEvidenceRegenerated?.(mergedContent);
-    return verdict;
-  }
-
-  // ── Upload: saves file(s) as evidence, THEN runs the deterministic
-  // relevance check on each one and applies the result immediately.
-  // Supports multiple files at once.
-  async function handleFileSelect(e) {
-    const files = Array.from(e.target.files || []);
-    if (files.length === 0 || !reportId) return;
+  async function handleAttachFile(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
     setUploading(true);
     setReviewError("");
-    setLastVerdict(null);
     try {
-      let existingIds = new Set();
-      try {
-        const snapRes  = await fetch(`${RISK_DOCUMENTS_API}?portal=user`);
-        const snapData = await snapRes.json();
-        const snapList = snapData.reports || snapData.documents || snapData.items || [];
-        existingIds = new Set(
-          snapList.map((d) => d.reportId || d.documentId || d.document_id).filter(Boolean)
-        );
-      } catch {}
+      const urlRes = await fetch(RISK_ATTACHMENT_URL_API(docKey), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fileName: file.name, contentType: file.type || "application/octet-stream" }),
+      });
+      const urlData = await urlRes.json();
+      if (!urlRes.ok) throw new Error(urlData.error || "Could not get an upload link.");
 
-      for (const file of files) {
-        setUploadStage(`Uploading ${file.name}…`);
-        const urlRes = await fetch(RISK_ATTACHMENT_URL_API, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ file_name: file.name, content_type: file.type || "application/pdf" }),
-        });
-        const urlData   = await urlRes.json();
-        const uploadUrl = urlData.uploadUrl || urlData.upload_url || urlData.url || urlData.presignedUrl;
-        if (!uploadUrl) throw new Error(`Could not get an upload link for ${file.name}.`);
+      const putRes = await fetch(urlData.uploadUrl, {
+        method: "PUT",
+        headers: { "Content-Type": file.type || "application/octet-stream" },
+        body: file,
+      });
+      if (!putRes.ok) throw new Error("Upload to storage failed.");
 
-        const putRes = await fetch(uploadUrl, {
-          method: "PUT",
-          headers: { "Content-Type": file.type || "application/pdf" },
-          body: file,
-        });
-        if (!putRes.ok) throw new Error(`Uploading ${file.name} to storage failed.`);
-
-        setUploadStage(`Extracting text from ${file.name}…`);
-        const evidenceReportId = await waitForRiskEvidenceDocument(file.name, existingIds);
-        existingIds.add(evidenceReportId);
-
-        await saveRiskUpdate({ newAttachment: { fileName: file.name, s3Key: evidenceReportId } });
-
-        // Run the deterministic relevance check for THIS document right
-        // away. If multiple files are uploaded together, each is
-        // checked in turn and the last one's verdict determines the
-        // final risk row state.
-        await checkRelevanceAndApply(evidenceReportId);
-      }
+      await saveDocUpdate({ newAttachment: { fileName: file.name, s3Key: urlData.s3Key } });
     } catch (err) {
       setReviewError(err.message || "Failed to attach the document. Please try again.");
     } finally {
       setUploading(false);
-      setUploadStage("");
       e.target.value = "";
     }
   }
 
-  // ── Remove a wrongly-attached document ──────────────────────────────
-  async function handleRemoveAttachment(s3Key) {
-    await saveRiskUpdate({ removeAttachment: { s3Key } });
-  }
-
-  // Save now ONLY handles status/comments — it never triggers a
-  // re-analysis. Relevance checking happens automatically and exactly
-  // once per uploaded document, at upload time (see handleFileSelect).
-  async function handleManualSave() {
-    const pendingComment = newComment.trim();
-    const patch = { status: review?.status || "open" };
-    if (review?.status === "other") patch.customStatusText = customStatusText;
-    if (pendingComment) patch.newComment = { author: "User", text: pendingComment };
-    const result = await saveRiskUpdate(patch);
-    if (result) {
-      if (pendingComment) setNewComment("");
-      setSavedConfirmation(true);
-      setTimeout(() => setSavedConfirmation(false), 2500);
-    }
+  function handleReviewerNameBlur() {
+    setReviewerName(reviewerName);
   }
 
   return (
@@ -716,154 +457,102 @@ function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onR
           )}
 
           {/* ══════════════════════════════════════════════════════════
-              ── ADD-ON: Per-Risk Review Status & Supporting Evidence ──
+              ── ADD-ON: Risk Review & Resolution Workflow ──────────────
               Everything below is new. Nothing above this line changed.
               ══════════════════════════════════════════════════════════ */}
+          <div className="single-section risk-review-section">
+            <div className="single-section-label">🗂️ Review & Resolution</div>
 
-          {lastVerdict && (
-            <div className="single-section"
-              style={{
-                background: lastVerdict.relevant ? "#eff6ff" : "#fffbeb",
-                borderColor: lastVerdict.relevant ? "#93c5fd" : "#fcd34d",
-              }}>
-              <div className="single-section-label">
-                {lastVerdict.relevant ? "🤖 AI Relevance Check — Relevant" : "🤖 AI Relevance Check — Not Related"}
-              </div>
-              <div className="single-section-body">
-                {!lastVerdict.relevant && (
-                  <strong>Note: this document does not appear related to this risk. Risk level unchanged.</strong>
-                )}
-                {lastVerdict.relevant && lastVerdict.resolves_risk && (
-                  <strong>This document fully resolves the risk. Risk level reduced by two steps (e.g. High → Medium).</strong>
-                )}
-                {lastVerdict.relevant && !lastVerdict.resolves_risk && (
-                  <strong>This document partially addresses the risk. Risk level reduced one step.</strong>
-                )}
-                <div style={{ marginTop: 6, fontStyle: "italic" }}>{lastVerdict.reason}</div>
-
-                {/* SPECIFIC-GAP FEATURE: show exactly what was confirmed
-                    and what's still missing, when the agent provides it.
-                    Safe to render even against the older deployed agent —
-                    these fields will simply be absent/empty and nothing
-                    extra shows. */}
-                {lastVerdict.relevant && lastVerdict.specifically_addressed && (
-                  <div style={{ marginTop: 8 }}>
-                    <strong>✅ Confirmed:</strong> {lastVerdict.specifically_addressed}
-                  </div>
-                )}
-                {lastVerdict.relevant && !lastVerdict.resolves_risk && lastVerdict.still_outstanding && (
-                  <div style={{ marginTop: 4 }}>
-                    <strong>⏳ Still outstanding:</strong> {lastVerdict.still_outstanding}
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
-          <div className="single-section risk-item-review-section">
-            <div className="single-section-label">📎 Supporting Document(s)</div>
             {reviewLoading ? (
-              <div className="single-section-body">Loading…</div>
+              <div className="single-section-body">Loading review status…</div>
             ) : (
               <>
                 {reviewError && <div className="risk-review-error">⚠️ {reviewError}</div>}
-                {review?.attachments?.length > 0 && (
-                  <ul className="risk-review-attachment-list">
-                    {review.attachments.map((a, i) => (
-                      <li key={i} className="risk-review-attachment-item">
-                        📎 {a.fileName}
-                        <span className="risk-review-attachment-meta">
-                          — {new Date(a.uploadedAt).toLocaleDateString()}
-                        </span>
-                        <button
-                          type="button"
-                          className="risk-review-attachment-remove"
-                          onClick={() => handleRemoveAttachment(a.s3Key)}
-                          disabled={uploading || saving}
-                          title="Remove this document"
-                        >
-                          Cancel
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                <label className="risk-review-upload-btn">
-                  <input type="file" multiple onChange={handleFileSelect} disabled={uploading} />
-                  {uploading ? (uploadStage || "Processing…") : "➕ Upload supporting document(s)"}
-                </label>
-              </>
-            )}
-          </div>
 
-          <div className="single-section risk-item-review-section">
-            <div className="single-section-label">🗂️ Review Status</div>
-            {!reviewLoading && (
-              <>
-                <select
-                  className="risk-review-select"
-                  value={review?.status || "open"}
-                  onChange={handleStatusChange}
-                  disabled={saving}
-                >
-                  {Object.entries(RISK_ITEM_STATUS_LABELS).map(([value, { label, icon }]) => (
-                    <option key={value} value={value}>{icon} {label}</option>
-                  ))}
-                </select>
-                {review?.status === "other" && (
+                <div className="risk-review-field">
+                  <label className="risk-review-field-label">Your name (remembered on this device)</label>
                   <input
                     type="text"
                     className="risk-review-input"
-                    placeholder="Enter a custom status…"
-                    value={customStatusText}
-                    onChange={(e) => setCustomStatusText(e.target.value)}
-                    onBlur={handleCustomStatusBlur}
-                    style={{ marginTop: "8px" }}
+                    placeholder="e.g. Hasini"
+                    value={reviewerName}
+                    onChange={(e) => setReviewerNameState(e.target.value)}
+                    onBlur={handleReviewerNameBlur}
                   />
-                )}
-              </>
-            )}
-          </div>
+                </div>
 
-          <div className="single-section risk-item-review-section">
-            <div className="single-section-label">📝 Comments &amp; Justification</div>
-            {!reviewLoading && (
-              <>
-                {review?.comments?.length > 0 && (
-                  <div className="risk-review-comment-list">
-                    {review.comments.map((c, i) => (
-                      <div key={i} className="risk-review-comment">
-                        <div className="risk-review-comment-meta">
-                          <strong>{c.author}</strong> · {new Date(c.timestamp).toLocaleString()}
-                        </div>
-                        <div className="risk-review-comment-text">{c.text}</div>
-                      </div>
+                <div className="risk-review-field">
+                  <label className="risk-review-field-label">Status</label>
+                  <select
+                    className="risk-review-select"
+                    value={review?.status || "open"}
+                    onChange={handleStatusChange}
+                    disabled={saving}
+                  >
+                    {Object.entries(STATUS_LABELS).map(([value, { label, icon }]) => (
+                      <option key={value} value={value}>{icon} {label}</option>
                     ))}
-                  </div>
-                )}
-                <textarea
-                  className="risk-review-textarea"
-                  placeholder="Enter your response, justification, or management comments…"
-                  value={newComment}
-                  onChange={(e) => setNewComment(e.target.value)}
-                  rows={3}
-                />
-                <button
-                  className="risk-review-comment-btn"
-                  onClick={handleAddComment}
-                  disabled={saving || !newComment.trim()}
-                >
-                  {saving ? "Saving…" : "Add comment"}
-                </button>
+                  </select>
+                </div>
+
+                <div className="risk-review-field">
+                  <label className="risk-review-field-label">
+                    Supporting documents for this report ({docReview?.attachments?.length || 0})
+                  </label>
+                  <p className="risk-review-hint">
+                    Shared across every risk in this report — one upload can support several findings.
+                  </p>
+                  {docReview?.attachments?.length > 0 && (
+                    <ul className="risk-review-attachment-list">
+                      {docReview.attachments.map((a, i) => (
+                        <li key={i} className="risk-review-attachment-item">
+                          📎 {a.fileName}
+                          <span className="risk-review-attachment-meta">
+                            — {a.uploadedBy || "unknown"}, {new Date(a.uploadedAt).toLocaleDateString()}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  <label className="risk-review-upload-btn">
+                    <input type="file" onChange={handleAttachFile} disabled={uploading} />
+                    {uploading ? "Uploading…" : "➕ Attach a document"}
+                  </label>
+                </div>
+
+                <div className="risk-review-field">
+                  <label className="risk-review-field-label">
+                    Comments & justification ({review?.comments?.length || 0})
+                  </label>
+                  {review?.comments?.length > 0 && (
+                    <div className="risk-review-comment-list">
+                      {review.comments.map((c, i) => (
+                        <div key={i} className="risk-review-comment">
+                          <div className="risk-review-comment-meta">
+                            <strong>{c.author}</strong> · {new Date(c.timestamp).toLocaleString()}
+                          </div>
+                          <div className="risk-review-comment-text">{c.text}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <textarea
+                    className="risk-review-textarea"
+                    placeholder="Add your review, response, or justification…"
+                    value={newComment}
+                    onChange={(e) => setNewComment(e.target.value)}
+                    rows={3}
+                  />
+                  <button
+                    className="risk-review-comment-btn"
+                    onClick={handleAddComment}
+                    disabled={saving || !newComment.trim()}
+                  >
+                    {saving ? "Saving…" : "Add comment"}
+                  </button>
+                </div>
               </>
             )}
-          </div>
-
-          <div className="risk-review-save-row">
-            <button className="risk-review-save-btn" onClick={handleManualSave} disabled={saving || uploading}>
-              {saving ? "Saving…" : "💾 Save"}
-            </button>
-            {savedConfirmation && <span className="risk-review-saved-note">✅ Saved</span>}
           </div>
           {/* ── END ADD-ON ─────────────────────────────────────────── */}
 
@@ -979,6 +668,12 @@ function RiskBadge({ rawText, onBadgeClick }) {
   const cfg = getRisk(rawText);
   if (!cfg) return <span>{rawText}</span>;
 
+  // "To Be Assessed" cells are informational, not a confirmed finding —
+  // they're excluded from the Gap Analysis data entirely (see
+  // parseRiskRows), so there is no matching item to open a details modal
+  // for. Showing a live-looking "⚠️ Details" button that silently does
+  // nothing when clicked is worse than showing no button at all, so this
+  // renders a plain neutral badge instead.
   if (isUnassessedRisk(rawText)) {
     return (
       <span className="risk-badge" style={{ background: cfg.bg, color: cfg.text }}>
@@ -1109,35 +804,6 @@ function Chatbot({
     ]);
   }
 
-  // Called from a risk's detail modal once the deterministic relevance
-  // check has updated this specific risk's row. Updates the currently
-  // displayed report message in place (re-parsing risk rows so the Gap
-  // Analysis panel reflects the change), and persists the new version
-  // via the same onReportGenerated callback normal generation already
-  // uses — which also keeps the Master Agent overview in sync.
-  function handleRiskEvidenceRegenerated(newRawContent) {
-    const content  = removeSourcesFromAnswer(newRawContent);
-    const audit    = isAuditReport(content);
-    const riskData = audit ? parseRiskRows(content) : null;
-    if (audit && onReportGenerated) onReportGenerated(content);
-    setMessages((prev) => {
-      const lastAuditIndex = [...prev].reverse().findIndex((m) => m.isAuditReport);
-      if (lastAuditIndex === -1) return prev;
-      const realIndex = prev.length - 1 - lastAuditIndex;
-      return prev.map((m, i) => (i === realIndex ? { ...m, content, isAuditReport: audit, riskData } : m));
-    });
-
-    // FIX (Bug A): refresh the currently-open modal's item so its risk
-    // bar/pct/response update immediately instead of only on next open.
-    if (riskData && modalItem) {
-      const allItems = [...riskData.needsAttention, ...riskData.improved];
-      const updated = allItems.find(
-        (it) => it.area.toLowerCase().trim() === modalItem.area.toLowerCase().trim()
-      );
-      if (updated) setModalItem(updated);
-    }
-  }
-
   // ── Mount / reportId change ──────────────────────────────────────────
   useEffect(() => {
     preShownRef.current = false;
@@ -1201,6 +867,10 @@ function Chatbot({
       return;
     }
 
+    // Background generation stopped without ever producing a result
+    // (e.g. it hit its retry limit or the runtime failed silently).
+    // Without this, the chat would otherwise be stuck showing "please
+    // wait" forever with the input disabled.
     if (wasGeneratingRef.current && !preGeneratedReport && !preShownRef.current) {
       wasGeneratingRef.current = false;
       if (!sendOnceRef.current) {
@@ -1303,16 +973,7 @@ function Chatbot({
 
   return (
     <section className={generalMode ? "chatbot-card chatbot-card-general" : "chatbot-card"}>
-      {modalItem && (
-        <ItemModal
-          item={modalItem}
-          onClose={() => setModalItem(null)}
-          reportId={reportId}
-          agentId={agentId}
-          currentReportContent={[...messages].reverse().find((m) => m.isAuditReport)?.content || ""}
-          onRiskEvidenceRegenerated={handleRiskEvidenceRegenerated}
-        />
-      )}
+      {modalItem && <ItemModal item={modalItem} onClose={() => setModalItem(null)} reportId={reportId} agentId={agentId} />}
 
       <div className="chatbot-messages">
         {messages.map((msg, i) => (

@@ -69,7 +69,18 @@ def lambda_handler(event, context):
         selected_agent = (
             body.get("selectedAgent") or body.get("agent") or "audit_planning_agent"
         )
-        general_mode = bool(body.get("generalMode") or body.get("general_mode") or False)
+        general_mode = bool(body.get("generalMode") or body.get("general_mode")or False)
+
+        # ── Per-risk deterministic evidence relevance check (ADD-ON) ────
+        # This field was previously silently dropped here: the payload
+        # forwarded to the worker only included a fixed set of named
+        # fields, none of which was relevanceCheck. That caused every
+        # relevance-check request to fall through to normal full audit
+        # planning generation instead, producing a markdown report that
+        # the frontend's JSON.parse then failed on ("Could not read the
+        # assessment result"). It is now read from the request body and
+        # passed straight through to the worker Lambda below.
+        relevance_check = body.get("relevanceCheck") or body.get("relevance_check")
 
         selected_report_context = get_selected_report_context(body, report_ids)
 
@@ -77,6 +88,7 @@ def lambda_handler(event, context):
         print("CHAT_REPORT_IDS:", report_ids)
         print("CHAT_SELECTED_AGENT:", selected_agent)
         print("CHAT_CONTEXT_LENGTH:", len(selected_report_context or ""))
+        print("CHAT_RELEVANCE_CHECK:", bool(relevance_check))
 
         # Save the user's message immediately — no need to wait for the
         # agent's answer to do this.
@@ -106,6 +118,7 @@ def lambda_handler(event, context):
             user_id=user_id,
             selected_agent=selected_agent,
             general_mode=general_mode,
+            relevance_check=relevance_check,
         )
 
         # Respond immediately. The frontend polls /chat/status/{jobId}
@@ -292,6 +305,7 @@ def invoke_worker_async(
     report_ids=None,
     selected_agent="audit_planning_agent",
     general_mode=False,
+    relevance_check=None,
 ):
     if not AUDIT_PLANNING_WORKER_FUNCTION_NAME:
         raise RuntimeError(
@@ -309,9 +323,13 @@ def invoke_worker_async(
         "user_id": user_id,
         "selected_agent": selected_agent or "audit_planning_agent",
         "general_mode": general_mode or False,
+        # Passed through unchanged so the worker Lambda (and ultimately
+        # the AgentCore agent) can see it. None when not a relevance
+        # check request, matching the field's absence in normal calls.
+        "relevance_check": relevance_check,
     }
 
-    print("DISPATCHING_WORKER_JOB:", job_id, "AGENT:", selected_agent)
+    print("DISPATCHING_WORKER_JOB:", job_id, "AGENT:", selected_agent, "RELEVANCE_CHECK:", bool(relevance_check))
 
     lambda_client.invoke(
         FunctionName=AUDIT_PLANNING_WORKER_FUNCTION_NAME,
@@ -354,7 +372,7 @@ def get_combined_report_context_from_dynamodb(report_ids):
         context = get_report_context_from_dynamodb(report_id)
         if not context:
             continue
-        sections.append(f"=== Document {index} of {len(report_ids)} (report_id: {report_id}) ===\n{context}")
+        sections.append(f"=== Document {index} of {len(report_ids)} (report_id:{report_id}) ===\n{context}")
     return "\n\n".join(sections)
 
 

@@ -76,6 +76,7 @@ def lambda_handler(event, context):
                 report_ids=event.get("report_ids"),
                 selected_agent=event.get("selected_agent", "audit_planning_agent"),
                 general_mode=event.get("general_mode", False),
+                relevance_check=event.get("relevance_check"),
             )
 
             update_job(
@@ -118,6 +119,7 @@ def invoke_agentcore_agent(
     report_ids=None,
     selected_agent=None,
     general_mode=False,
+    relevance_check=None,
 ):
     agent_key = selected_agent or "audit_planning_agent"
     runtime_config = AGENT_RUNTIME_CONFIG.get(agent_key) or AGENT_RUNTIME_CONFIG["audit_planning_agent"]
@@ -153,12 +155,22 @@ def invoke_agentcore_agent(
         "document_text":  selected_report_context or "",
     }
 
+    # ── Per-risk deterministic evidence relevance check (ADD-ON) ────────
+    # Previously dropped here: this function built its own fixed payload
+    # with no key for relevance_check, so even after the chatbot Lambda
+    # was fixed to forward it, this Lambda would still silently discard
+    # it before calling AgentCore. Now included under the same key name
+    # (relevanceCheck) the agent's run_agent() checks for.
+    if relevance_check:
+        payload["relevanceCheck"] = relevance_check
+
     print("WORKER_INVOKING_AGENTCORE_AGENT:", agent_key)
     print("AGENTCORE_RUNTIME_ARN:", runtime_arn)
     print("AGENTCORE_QUALIFIER:", runtime_qualifier)
     print("REPORT_IDS:", resolved_report_ids)
     print("SELECTED_AGENT:", selected_agent)
     print("GENERAL_MODE:", general_mode)
+    print("RELEVANCE_CHECK:", bool(relevance_check))
     print("CONTEXT_LENGTH:", len(selected_report_context or ""))
 
     response = agentcore_runtime.invoke_agent_runtime(

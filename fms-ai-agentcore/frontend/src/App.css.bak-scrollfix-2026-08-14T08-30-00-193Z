@@ -1915,10 +1915,3 @@ input  { font-family: inherit; }
   color: #3b82f6;
   font-weight: 600;
 }
-
-.risk-review-screen-body {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 20px 24px 60px;
-}

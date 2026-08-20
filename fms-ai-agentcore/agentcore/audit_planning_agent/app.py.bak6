@@ -115,38 +115,26 @@ You are assessing whether a specific document is relevant evidence for a
 specific audit risk. Respond with STRICT JSON only — no other text, no
 markdown code fences, no explanation outside the JSON object.
 
-Schema (exactly these five fields, nothing else):
+Schema (exactly these three fields, nothing else):
 {
   "relevant": true or false,
   "resolves_risk": true or false,
-  "reason": "one short sentence explaining your decision",
-  "specifically_addressed": "what part of the risk this document actually confirms, in plain terms — empty string if not relevant",
-  "still_outstanding": "what part of the Planned Response remains unconfirmed or unexplained by this document — empty string if fully resolved or not relevant"
+  "reason": "one short sentence explaining your decision"
 }
 
 Rules:
 - "relevant" = false if the document has nothing meaningfully to do with
   this specific risk area (e.g. a trade license uploaded for a bank
   reconciliation risk, or a VAT return uploaded for a fixed asset risk).
-  If relevant is false, resolves_risk MUST also be false, and both
-  specifically_addressed and still_outstanding MUST be empty strings.
+  If relevant is false, resolves_risk MUST also be false.
 - "relevant" = true if the document discusses, confirms, explains, or
   directly addresses this risk's subject matter, even partially.
 - "resolves_risk" = true ONLY if the document fully and directly answers
   everything described in the Planned Response below — every number,
-  every condition, with no gaps remaining. In this case
-  still_outstanding MUST be an empty string.
+  every condition, with no gaps remaining.
 - "resolves_risk" = false if the document is relevant but leaves any
   part of the Planned Response unaddressed or unconfirmed.
-- "specifically_addressed" must name the CONCRETE fact confirmed (e.g.
-  "Bank balance of AED 542,000 confirmed by bank statement"), not a
-  vague summary. This is required whenever relevant is true.
-- "still_outstanding" must name the CONCRETE gap that remains (e.g.
-  "The AED 62,000 reconciling difference between books and bank is not
-  explained — no listing of outstanding cheques or deposits in
-  transit was provided"). This is required whenever relevant is true
-  and resolves_risk is false.
-- Be decisive. Do not hedge. Pick true or false for each boolean field.
+- Be decisive. Do not hedge. Pick true or false for each field.
 - Never invent facts not present in the evidence document text.
 """
     user_prompt = f"""
@@ -174,21 +162,16 @@ Return the JSON assessment now. Nothing else.
             cleaned = cleaned[4:].strip()
     try:
         parsed = json.loads(cleaned)
-        is_relevant = bool(parsed.get("relevant", False))
         return {
-            "relevant": is_relevant,
-            "resolves_risk": bool(parsed.get("resolves_risk", False)) if is_relevant else False,
+            "relevant": bool(parsed.get("relevant", False)),
+            "resolves_risk": bool(parsed.get("resolves_risk", False)) if parsed.get("relevant") else False,
             "reason": str(parsed.get("reason", "")).strip() or "No reason provided.",
-            "specifically_addressed": str(parsed.get("specifically_addressed", "")).strip() if is_relevant else "",
-            "still_outstanding": str(parsed.get("still_outstanding", "")).strip() if is_relevant else "",
         }
     except Exception:
         return {
             "relevant": False,
             "resolves_risk": False,
             "reason": "Could not determine relevance — the assessment could not be parsed. Treating as not relevant to avoid an incorrect risk reduction.",
-            "specifically_addressed": "",
-            "still_outstanding": "",
         }
 
 

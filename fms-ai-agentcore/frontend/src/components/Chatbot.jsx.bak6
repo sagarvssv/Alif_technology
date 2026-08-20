@@ -244,66 +244,22 @@ function findTableRowLineIndex(lines, targetArea) {
   return -1;
 }
 
-// FIX (Bug B): the old note strings applyRiskVerdictToReport used to
-// write are fixed and known, so any previous one can be safely stripped
-// before appending the current verdict's note — preventing old and new
-// notes from piling up together in the same cell.
+// FIX (Bug B): the three note strings applyRiskVerdictToReport can
+// write are fixed and known, so any previous one can be safely
+// stripped before appending the current verdict's note — preventing
+// old and new notes from piling up together in the same cell.
 const KNOWN_VERDICT_NOTES = [
   "Resolved by uploaded evidence — fully addresses the planned response.",
   "Partially addressed by uploaded evidence — some items remain outstanding.",
   "Note: the uploaded document does not appear related to this risk — no change made.",
 ];
 
-// SPECIFIC-GAP FEATURE: notes are now built dynamically from the AI's
-// specifically_addressed / still_outstanding fields (see
-// buildVerdictNote below), so they can no longer be matched against a
-// small fixed list. Every note we write is prefixed with this marker so
-// it can always be found and stripped, regardless of its exact wording.
-const VERDICT_NOTE_MARKER = "🤖 Evidence check —";
-
 function stripPreviousVerdictNote(text) {
   let cleaned = text;
-  // New marker-based notes (this version onward): cut everything from
-  // the marker to the end of the cell.
-  const markerIndex = cleaned.indexOf(`— ${VERDICT_NOTE_MARKER}`);
-  if (markerIndex !== -1) {
-    cleaned = cleaned.slice(0, markerIndex);
-  }
-  // Legacy fixed-string notes (rows saved before this version) — kept
-  // for backward compatibility with reports generated previously.
   for (const note of KNOWN_VERDICT_NOTES) {
     cleaned = cleaned.split(` — ${note}`).join("");
   }
   return cleaned.trim();
-}
-
-// SPECIFIC-GAP FEATURE: builds a note that names the concrete fact the
-// evidence confirmed and, if the risk isn't fully resolved, the concrete
-// gap that remains — instead of a generic "partially addressed" label.
-// Falls back to the old generic wording if the agent hasn't been
-// updated yet or returns these fields empty, so this stays compatible
-// with the currently deployed agent.
-function buildVerdictNote(verdict) {
-  if (!verdict.relevant) {
-    return "the uploaded document does not appear related to this risk — no change made.";
-  }
-
-  const addressed   = (verdict.specifically_addressed || "").trim();
-  const outstanding = (verdict.still_outstanding || "").trim();
-
-  if (verdict.resolves_risk) {
-    return addressed
-      ? `Resolved — confirmed: ${addressed}.`
-      : "Resolved by uploaded evidence — fully addresses the planned response.";
-  }
-
-  if (addressed && outstanding) {
-    return `Partially addressed — confirmed: ${addressed}. Still outstanding: ${outstanding}.`;
-  }
-  if (addressed) {
-    return `Partially addressed — confirmed: ${addressed}. Some items remain outstanding.`;
-  }
-  return "Partially addressed by uploaded evidence — some items remain outstanding.";
 }
 
 // ── Deterministic row rewrite ───────────────────────────────────────────
@@ -331,7 +287,7 @@ function rewriteRiskRow(line, newLevelLabel, noteText) {
   let lastRealIndex = parts.length - 2; // parts[len-1] is the trailing "" after the final pipe
   if (lastRealIndex >= 1 && noteText) {
     const existing = stripPreviousVerdictNote(parts[lastRealIndex].trim());
-    parts[lastRealIndex] = ` ${existing} — ${VERDICT_NOTE_MARKER} ${noteText} `;
+    parts[lastRealIndex] = ` ${existing} — ${noteText} `;
   }
   return parts.join("|");
 }
@@ -343,16 +299,19 @@ function applyRiskVerdictToReport(oldMarkdown, targetArea, verdict, currentLevel
   if (rowIndex === -1) return oldMarkdown;
 
   let newLevelLabel = currentLevelLabel;
+  let note = "";
 
   if (!verdict.relevant) {
     newLevelLabel = currentLevelLabel; // unchanged
+    note = "Note: the uploaded document does not appear related to this risk — no change made.";
   } else if (verdict.resolves_risk) {
     newLevelLabel = stepDownRiskLevel(currentLevelLabel, 2);
+    note = "Resolved by uploaded evidence — fully addresses the planned response.";
   } else {
     newLevelLabel = stepDownRiskLevel(currentLevelLabel, 1);
+    note = "Partially addressed by uploaded evidence — some items remain outstanding.";
   }
 
-  const note = buildVerdictNote(verdict);
   lines[rowIndex] = rewriteRiskRow(lines[rowIndex], newLevelLabel, note);
   return lines.join("\n");
 }
@@ -471,11 +430,10 @@ function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onR
 
   // ── Deterministic relevance check for ONE newly uploaded document ────
   // Calls the agent's narrow relevanceCheck route (see agentcore
-  // audit_planning_agent/app.py) which returns { relevant, resolves_risk,
-  // reason, specifically_addressed, still_outstanding } — never a full
-  // report. The frontend then computes the new risk level itself via a
-  // fixed lookup table (stepDownRiskLevel) and edits ONLY this risk's
-  // table row directly.
+  // audit_planning_agent/app.py) which returns only { relevant,
+  // resolves_risk, reason } — never a full report. The frontend then
+  // computes the new risk level itself via a fixed lookup table
+  // (stepDownRiskLevel) and edits ONLY this risk's table row directly.
   //
   // IMPORTANT FIX: every other call to CHAT_API in this codebase always
   // includes non-empty "message" and "question" fields. The upstream
@@ -519,13 +477,7 @@ function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onR
     try {
       verdict = JSON.parse(rawAnswer);
     } catch {
-      verdict = {
-        relevant: false,
-        resolves_risk: false,
-        reason: "Could not read the assessment result.",
-        specifically_addressed: "",
-        still_outstanding: "",
-      };
+      verdict = { relevant: false, resolves_risk: false, reason: "Could not read the assessment result." };
     }
     setLastVerdict(verdict);
 
@@ -740,22 +692,6 @@ function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onR
                   <strong>This document partially addresses the risk. Risk level reduced one step.</strong>
                 )}
                 <div style={{ marginTop: 6, fontStyle: "italic" }}>{lastVerdict.reason}</div>
-
-                {/* SPECIFIC-GAP FEATURE: show exactly what was confirmed
-                    and what's still missing, when the agent provides it.
-                    Safe to render even against the older deployed agent —
-                    these fields will simply be absent/empty and nothing
-                    extra shows. */}
-                {lastVerdict.relevant && lastVerdict.specifically_addressed && (
-                  <div style={{ marginTop: 8 }}>
-                    <strong>✅ Confirmed:</strong> {lastVerdict.specifically_addressed}
-                  </div>
-                )}
-                {lastVerdict.relevant && !lastVerdict.resolves_risk && lastVerdict.still_outstanding && (
-                  <div style={{ marginTop: 4 }}>
-                    <strong>⏳ Still outstanding:</strong> {lastVerdict.still_outstanding}
-                  </div>
-                )}
               </div>
             </div>
           )}
