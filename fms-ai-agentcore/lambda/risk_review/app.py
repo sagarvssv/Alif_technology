@@ -59,6 +59,8 @@ def empty_review(risk_key):
         "customStatusText": "",
         "comments": [],
         "attachments": [],
+        "checklistItems": [],
+        "checklistBaseLevel": None,
         "statusHistory": [
             {"status": "open", "changedBy": "system", "changedAt": now_iso()}
         ],
@@ -81,6 +83,8 @@ def get_review(risk_key):
         "customStatusText": item.get("custom_status_text", ""),
         "comments": item.get("comments", []),
         "attachments": item.get("attachments", []),
+        "checklistItems": item.get("checklist_items", []),
+        "checklistBaseLevel": item.get("checklist_base_level"),
         "statusHistory": item.get("status_history", []),
         "createdAt": item.get("created_at"),
         "lastUpdated": item.get("last_updated"),
@@ -104,6 +108,14 @@ def handle_put(risk_key, body):
       newAttachment: { fileName, s3Key }
       removeAttachment: { s3Key } — removes a previously attached
         document, e.g. one added by mistake, before re-analysis is run.
+      setChecklist: [ "item text 1", "item text 2", ... ] — initializes
+        this risk's checklist the FIRST time it's generated. Ignored if
+        a checklist already exists, so re-opening the modal never wipes
+        progress already made. Each item is stored with a stable id and
+        starts unsatisfied/unchecked.
+      updateChecklistItem: { id, satisfied?, satisfiedBy?,
+        manuallyChecked?, justification? } — patches ONE existing
+        checklist item by id. Only the fields provided are changed.
       changedBy: string (who made this update, for status history)
     Each field is applied additively — a PUT only touches the fields it
     includes, so the frontend can update status and add a comment in the
@@ -157,6 +169,40 @@ def handle_put(risk_key, body):
             a for a in existing["attachments"] if a.get("s3Key") != remove_attachment["s3Key"]
         ]
 
+    set_checklist = body.get("setChecklist")
+    if set_checklist and isinstance(set_checklist, list) and not existing.get("checklistItems"):
+        existing["checklistItems"] = [
+            {
+                "id": uuid.uuid4().hex,
+                "text": str(text).strip(),
+                "satisfied": False,
+                "satisfiedBy": None,
+                "manuallyChecked": False,
+                "justification": "",
+            }
+            for text in set_checklist
+            if str(text).strip()
+        ]
+        base_level = body.get("baseRiskLevel")
+        if base_level and not existing.get("checklistBaseLevel"):
+            existing["checklistBaseLevel"] = str(base_level)
+
+    update_checklist_item = body.get("updateChecklistItem")
+    if update_checklist_item and isinstance(update_checklist_item, dict) and update_checklist_item.get("id"):
+        target_id = update_checklist_item["id"]
+        for checklist_item in existing.get("checklistItems", []):
+            if checklist_item.get("id") != target_id:
+                continue
+            if "satisfied" in update_checklist_item:
+                checklist_item["satisfied"] = bool(update_checklist_item["satisfied"])
+            if "satisfiedBy" in update_checklist_item:
+                checklist_item["satisfiedBy"] = update_checklist_item["satisfiedBy"]
+            if "manuallyChecked" in update_checklist_item:
+                checklist_item["manuallyChecked"] = bool(update_checklist_item["manuallyChecked"])
+            if "justification" in update_checklist_item:
+                checklist_item["justification"] = str(update_checklist_item["justification"])
+            break
+
     existing["lastUpdated"] = now_iso()
     if not existing.get("createdAt"):
         existing["createdAt"] = existing["lastUpdated"]
@@ -168,6 +214,8 @@ def handle_put(risk_key, body):
             "custom_status_text": existing.get("customStatusText", ""),
             "comments": existing["comments"],
             "attachments": existing["attachments"],
+            "checklist_items": existing.get("checklistItems", []),
+            "checklist_base_level": existing.get("checklistBaseLevel"),
             "status_history": existing["statusHistory"],
             "created_at": existing["createdAt"],
             "last_updated": existing["lastUpdated"],

@@ -82,14 +82,6 @@ def lambda_handler(event, context):
         # passed straight through to the worker Lambda below.
         relevance_check = body.get("relevanceCheck") or body.get("relevance_check")
 
-        # ── Risk checklist decomposition (ADD-ON) ───────────────────────
-        # Same forwarding pattern as relevance_check above — must be
-        # read here and threaded through invoke_worker_async below, or
-        # it will be silently dropped exactly like relevance_check was
-        # before that fix, and every checklist request will fall through
-        # to normal full-report generation instead.
-        risk_checklist = body.get("riskChecklist") or body.get("risk_checklist")
-
         selected_report_context = get_selected_report_context(body, report_ids)
 
         print("CHAT_USER_MESSAGE:", user_message)
@@ -97,7 +89,6 @@ def lambda_handler(event, context):
         print("CHAT_SELECTED_AGENT:", selected_agent)
         print("CHAT_CONTEXT_LENGTH:", len(selected_report_context or ""))
         print("CHAT_RELEVANCE_CHECK:", bool(relevance_check))
-        print("CHAT_RISK_CHECKLIST:", bool(risk_checklist))
 
         # Save the user's message immediately — no need to wait for the
         # agent's answer to do this.
@@ -128,7 +119,6 @@ def lambda_handler(event, context):
             selected_agent=selected_agent,
             general_mode=general_mode,
             relevance_check=relevance_check,
-            risk_checklist=risk_checklist,
         )
 
         # Respond immediately. The frontend polls /chat/status/{jobId}
@@ -316,7 +306,6 @@ def invoke_worker_async(
     selected_agent="audit_planning_agent",
     general_mode=False,
     relevance_check=None,
-    risk_checklist=None,
 ):
     if not AUDIT_PLANNING_WORKER_FUNCTION_NAME:
         raise RuntimeError(
@@ -338,11 +327,9 @@ def invoke_worker_async(
         # the AgentCore agent) can see it. None when not a relevance
         # check request, matching the field's absence in normal calls.
         "relevance_check": relevance_check,
-        # Same treatment for the checklist-decomposition request.
-        "risk_checklist": risk_checklist,
     }
 
-    print("DISPATCHING_WORKER_JOB:", job_id, "AGENT:", selected_agent, "RELEVANCE_CHECK:", bool(relevance_check), "RISK_CHECKLIST:", bool(risk_checklist))
+    print("DISPATCHING_WORKER_JOB:", job_id, "AGENT:", selected_agent, "RELEVANCE_CHECK:", bool(relevance_check))
 
     lambda_client.invoke(
         FunctionName=AUDIT_PLANNING_WORKER_FUNCTION_NAME,

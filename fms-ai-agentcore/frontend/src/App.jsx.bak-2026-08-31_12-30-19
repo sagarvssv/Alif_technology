@@ -778,8 +778,12 @@ function App() {
   // the render it was created in.
   const selectedReportIdRef = useRef("");
 
-  const [view,               setView]               = useState(VIEW_PORTAL);
-  const [portal,             setPortal]             = useState(null);
+  // ── PORTAL REMOVED ────────────────────────────────────────────────────
+  // The User Portal has been removed; this app now runs Audit Portal
+  // ONLY. The portal-selection screen is skipped entirely by starting
+  // directly in the Audit Portal's Projects view instead of VIEW_PORTAL.
+  const [view,               setView]               = useState(VIEW_PROJECTS);
+  const [portal,             setPortal]             = useState("audit");
   const [reports,            setReports]            = useState([]);
   const [selectedReport,     setSelectedReport]     = useState(null);
   const [selectedReportId,   setSelectedReportId]   = useState("");
@@ -1333,48 +1337,11 @@ function App() {
     }
   }
 
-  async function selectPortal(type) {
-    resetHistory();
-    setPortal(type);
-
-    // Switching portals always starts completely fresh — leftover
-    // project/document state from a previous portal must never bleed
-    // into a different portal's sidebar. Without this, opening the User
-    // Portal after having worked in the Audit Portal would still show the
-    // Audit Portal's uploaded documents and per-document agent dropdowns.
-    setSelectedProjectItem(null);
-    setActiveProjectAgent(null);
-    setSelectedAgent(null);
-    setSelectedReport(null);
-    setSelectedReportId("");
-    setAgentReports(emptyAgentReportState());
-    setAgentReportsByDoc({});
-    setExpandedFileIds(new Set());
-
-    if (type === "manager") {
-      const list = await fetchReports();
-      setReports(list);
-      setView(VIEW_MANAGER_HOME);
-    } else if (type === "audit") {
-      setView(VIEW_PROJECTS);
-    } else {
-      setView(VIEW_HOME);
-    }
-  }
-
   function startNewChat() {
     resetHistory();
-    if (portal === "manager") {
-      setView(VIEW_MANAGER_HOME);
-      setSelectedReport(null);
-      setSelectedReportId("");
-    } else if (portal === "audit") {
-      setView(VIEW_PROJECTS);
-      setSelectedProjectItem(null);
-      setActiveProjectAgent(null);
-    } else {
-      setView(VIEW_HOME);
-    }
+    setView(VIEW_PROJECTS);
+    setSelectedProjectItem(null);
+    setActiveProjectAgent(null);
     setSelectedAgent(null);
     setAgentReports(emptyAgentReportState());
     setError("");
@@ -1562,68 +1529,25 @@ function App() {
 
   useEffect(() => { return () => stopPolling(); }, []);
 
-  // ── PORTAL SELECTION ─────────────────────────────────────────────────
-  if (view === VIEW_PORTAL) {
-    return (
-      <div className="portal-screen">
-        <div className="portal-hero">
-          <div className="portal-logo">AT</div>
-          <h1 className="portal-title"></h1>
-          <p className="portal-sub">FMS AI AgentCore — Enterprise Audit Intelligence Platform</p>
-        </div>
-        <p className="portal-prompt">Select your portal to continue</p>
-        <div className="portal-cards">
-          <button className="portal-card user-portal" onClick={() => selectPortal("user")}>
-            <div className="portal-card-icon">👤</div>
-            <div className="portal-card-body">
-              <div className="portal-card-title">User Portal</div>
-              <div className="portal-card-desc">
-                Upload your financial document and generate audit planning reports.
-                Ask questions about your own uploaded documents only.
-              </div>
-            </div>
-            <div className="portal-card-arrow">→</div>
-          </button>
-          <button className="portal-card audit-portal" onClick={() => selectPortal("audit")}>
-            <div className="portal-card-icon"><AuditShieldIcon size={28} /></div>
-            <div className="portal-card-body">
-              <div className="portal-card-title">Audit Portal</div>
-              <div className="portal-card-desc">
-                Organize your work by project. Create or open a project, then upload
-                documents and run agents scoped to that project.
-              </div>
-            </div>
-            <div className="portal-card-arrow">→</div>
-          </button>
-        </div>
-      </div>
-    );
-  }
-
   // ── MAIN APP ──────────────────────────────────────────────────────────
+  // NOTE: the portal-selection screen (VIEW_PORTAL) has been removed
+  // entirely along with the User Portal option. The app now always runs
+  // in Audit Portal mode, starting directly on the Projects view (see
+  // the initial useState values for `view`/`portal` above).
   return (
     <div className={`app-shell ${sidebarOpen ? "sidebar-open" : "sidebar-closed"}`}>
 
       <aside className="sidebar">
         <div className="brand-row">
-          <div className={`brand-logo-circle ${portal === "audit" ? "brand-logo-audit" : ""}`}>
-            {portal === "audit" ? <AuditShieldIcon size={20} /> : "AT"}
+          <div className="brand-logo-circle brand-logo-audit">
+            <AuditShieldIcon size={20} />
           </div>
           <div className="brand-text">
             <span className="brand-name"></span>
-            <span className="brand-sub">
-              {portal === "manager" ? "Manager Portal" : portal === "audit" ? "Audit Portal" : "User Portal"}
-            </span>
+            <span className="brand-sub">Audit Portal</span>
           </div>
           <button className="sidebar-toggle" onClick={() => setSidebarOpen((o) => !o)}>◀</button>
         </div>
-
-        {portal === "manager" && (
-          <button className="new-chat-btn" onClick={startNewChat}>
-            <span className="new-chat-icon">＋</span>
-            <span className="new-chat-label">New Chat</span>
-          </button>
-        )}
 
         <button
           className={`sidebar-projects-btn ${view === VIEW_PROJECTS ? "sidebar-projects-active" : ""}`}
@@ -1633,64 +1557,7 @@ function App() {
           <span className="sidebar-projects-label">Projects</span>
         </button>
 
-        {/* ── User Portal: current document's agents ──────────────────
-            Once a document is uploaded (no project involved), this shows
-            Master Agent / Audit Planning Agent / Financial Statement
-            Review Agent directly in the sidebar with live Preparing/Ready
-            status — replacing the old separate "Report Analysis" picker
-            screen that used to show these same three options in the main
-            content area. */}
-        {portal === "user" && selectedReportId && (
-          <div className="sidebar-section sidebar-project-agents">
-            <div className="sidebar-section-title">Your Document</div>
-
-            <button
-              className={`sidebar-agent-btn ${view === VIEW_MASTER_AGENT ? "sidebar-agent-active" : ""}`}
-              onClick={() => navigateTo(VIEW_MASTER_AGENT)}
-            >
-              <span className="sidebar-agent-icon">🧠</span>
-              <span className="sidebar-agent-label">Master Agent</span>
-              {(agentReports.audit_planning_agent?.preGenerating || agentReports.fs_review_agent?.preGenerating) && (
-                <span className="sidebar-agent-status status-generating">Preparing</span>
-              )}
-              {!(agentReports.audit_planning_agent?.preGenerating || agentReports.fs_review_agent?.preGenerating) &&
-                agentReports.audit_planning_agent?.preGenerated && agentReports.fs_review_agent?.preGenerated && (
-                <span className="sidebar-agent-status status-ready">Ready</span>
-              )}
-            </button>
-
-            {SUB_AGENTS.map((agent) => (
-              <button
-                key={agent.id}
-                className={`sidebar-agent-btn ${selectedAgent?.id === agent.id && view === VIEW_AGENT ? "sidebar-agent-active" : ""} ${!agent.available ? "sidebar-agent-disabled" : ""}`}
-                disabled={!agent.available}
-                onClick={() => {
-                  if (!agent.available) return;
-                  setSelectedAgent(agent);
-                  updateAgentReport(agent.id, { content: "" });
-                  navigateTo(VIEW_AGENT);
-                }}
-              >
-                <span className="sidebar-agent-icon">{agent.icon}</span>
-                <span className="sidebar-agent-label">{agent.label}</span>
-                {agent.available ? (
-                  <>
-                    {agentReports[agent.id]?.preGenerating && (
-                      <span className="sidebar-agent-status status-generating">Preparing</span>
-                    )}
-                    {!agentReports[agent.id]?.preGenerating && agentReports[agent.id]?.preGenerated && (
-                      <span className="sidebar-agent-status status-ready">Ready</span>
-                    )}
-                  </>
-                ) : (
-                  <span className="sidebar-agent-status status-soon">Soon</span>
-                )}
-              </button>
-            ))}
-          </div>
-        )}
-
-        {portal === "audit" && selectedProjectItem && (
+        {selectedProjectItem && (
           <div className="sidebar-section sidebar-project-agents">
             <div className="sidebar-section-title">{selectedProjectItem.projectName}</div>
 
@@ -1797,35 +1664,9 @@ function App() {
           </div>
         )}
 
-        {portal === "manager" && (
-          <div className="sidebar-section">
-            <div className="sidebar-section-title">All Documents</div>
-            {loadingReports && <p className="sidebar-muted">Loading…</p>}
-            {!loadingReports && reports.length === 0 && (
-              <p className="sidebar-muted">No documents uploaded yet.</p>
-            )}
-            {reports.map((r) => {
-              const id = getReportId(r);
-              return (
-                <button key={id}
-                  className={`report-item ${selectedReportId === id ? "report-item-active" : ""}`}
-                  onClick={() => openManagerChat(r)}>
-                  <span className="report-item-icon">📑</span>
-                  <div className="report-item-text">
-                    <span className="report-item-name">{getReportName(r)}</span>
-                    <span className="report-item-date">{formatDate(r.createdAt || r.created_at)}</span>
-                  </div>
-                  <span className={`report-status-dot ${["COMPLETED","READY"].includes(r.status) ? "dot-green" : "dot-yellow"}`} />
-                </button>
-              );
-            })}
-          </div>
-        )}
-
         <div style={{ marginTop: "auto" }}>
-          <button className="switch-portal-btn"
-            onClick={() => { resetHistory(); setView(VIEW_PORTAL); setPortal(null); }}>
-            ← Switch Portal
+          <button className="switch-portal-btn" onClick={startNewChat}>
+            🔄 Start Over
           </button>
         </div>
       </aside>
@@ -1868,77 +1709,6 @@ function App() {
 
         {processing && <ProcessingProgress progress={processingProgress} onCancel={handleCancelProcessing} />}
 
-        {/* USER HOME */}
-        {view === VIEW_HOME && (
-          <div className="home-view">
-            <div className="home-hero">
-              <div className="home-hero-logo">AT</div>
-              <h1 className="home-hero-title"></h1>
-              <p className="home-hero-sub">FMS AI AgentCore — Enterprise Audit Intelligence Platform</p>
-              <div className="portal-badge">👤 User Portal</div>
-            </div>
-            <p className="home-prompt">What would you like to do today?</p>
-            <div className="home-options">
-              <label className="home-option-card upload-card">
-                <input ref={fileInputRef} type="file" multiple
-                  accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg"
-                  onChange={handleMultiUpload} disabled={uploading || processing} />
-                <div className="option-icon"><UploadBoxIcon /></div>
-                <div className="option-body">
-                  <div className="option-title">Upload Financial Document(s)</div>
-                  <div className="option-desc">
-                    Upload one or more financial statements — select several at once
-                    with the ➕ picker. Each document gets its own independent Master
-                    Agent, Audit Planning, and Financial Statement Review results.
-                  </div>
-                </div>
-                <div className="option-arrow">→</div>
-              </label>
-            </div>
-            {uploading && <div className="home-status">⬆️ Uploading your document…</div>}
-          </div>
-        )}
-
-        {/* MANAGER HOME */}
-        {view === VIEW_MANAGER_HOME && (
-          <div className="manager-home-view">
-            <div className="manager-home-hero">
-              <div className="manager-home-icon">🏢</div>
-              <h2 className="manager-home-title">Manager Portal</h2>
-              <p className="manager-home-desc">
-                Select a document from the list below to open it and ask questions.
-                The AI will answer based on that specific document only.
-              </p>
-            </div>
-            {loadingReports && <p className="manager-loading">Loading documents…</p>}
-            {!loadingReports && reports.length === 0 && (
-              <div className="manager-empty">
-                <div className="manager-empty-icon">📭</div>
-                <p>No documents have been uploaded yet.</p>
-              </div>
-            )}
-            <div className="manager-doc-grid">
-              {reports.map((r) => {
-                const id   = getReportId(r);
-                const done = ["COMPLETED","READY"].includes(r.status || r.processingStatus);
-                return (
-                  <button key={id} className="manager-doc-card" onClick={() => openManagerChat(r)}>
-                    <div className="manager-doc-icon">📑</div>
-                    <div className="manager-doc-body">
-                      <div className="manager-doc-name">{getReportName(r)}</div>
-                      <div className="manager-doc-date">{formatDate(r.createdAt || r.created_at)}</div>
-                      <div className={`manager-doc-status ${done ? "status-done" : "status-pending"}`}>
-                        {done ? "✅ Ready" : "⏳ Processing"}
-                      </div>
-                    </div>
-                    <div className="manager-doc-open">Open →</div>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
         {view === VIEW_RISK_REVIEW && (
           <div className="chatbot-view">
             <div className="chatbot-nav-bar">
@@ -1955,25 +1725,12 @@ function App() {
           </div>
         )}
 
-        {/* MANAGER CHAT */}
-        {view === VIEW_MANAGER_CHAT && (
-          <div className="chatbot-view">
-            <div className="chatbot-nav-bar">
-              <button className="back-nav-btn"
-                onClick={() => { goBack(VIEW_MANAGER_HOME); setSelectedReport(null); setSelectedReportId(""); }}>
-                ← Back to Documents
-              </button>
-            </div>
-            <Chatbot reportId={selectedReportId} selectedReport={selectedReport} managerMode />
-          </div>
-        )}
-
         {/* MASTER AGENT */}
         {view === VIEW_MASTER_AGENT && (
           <div className="chatbot-view">
             <div className="chatbot-nav-bar">
               <button className="back-nav-btn"
-                onClick={() => goBack(selectedProjectItem ? VIEW_PROJECT_DETAIL : VIEW_HOME)}>
+                onClick={() => goBack(selectedProjectItem ? VIEW_PROJECT_DETAIL : VIEW_PROJECTS)}>
                 {selectedProjectItem ? "← Back to Project" : "← Back"}
               </button>
             </div>
@@ -2023,16 +1780,6 @@ function App() {
         {/* PROJECTS */}
         {view === VIEW_PROJECTS && (
           <div className="chatbot-view">
-            <div className="chatbot-nav-bar">
-              <button className="back-nav-btn"
-                onClick={() => {
-                  const fallback = portal === "manager" ? VIEW_MANAGER_HOME : portal === "audit" ? VIEW_PORTAL : VIEW_HOME;
-                  const target = goBack(fallback);
-                  if (target === VIEW_PORTAL) setPortal(null);
-                }}>
-                ← Back
-              </button>
-            </div>
             <Projects
               onOpenProject={(project) => {
                 setSelectedProjectItem(project);

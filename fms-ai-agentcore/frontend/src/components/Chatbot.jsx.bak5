@@ -12,6 +12,26 @@ const CHAT_STATUS_API = (jobId) => `${API_BASE_URL}/chat/status/${jobId}`;
 const POLL_INTERVAL_MS = 1000;
 const MAX_POLL_ATTEMPTS = 60;
 
+// ─── Per-Risk Review & Supporting Evidence (ADD-ON) ────────────────────
+const RISK_API = (riskKey) => `${API_BASE_URL}/risks/${encodeURIComponent(riskKey)}`;
+const RISK_ATTACHMENT_URL_API = `${API_BASE_URL}/upload-url`;
+const RISK_DOCUMENTS_API = `${API_BASE_URL}/documents`;
+const RISK_EVIDENCE_POLL_INTERVAL_MS = 4000;
+const RISK_EVIDENCE_MAX_POLL_ATTEMPTS = 45;
+
+function buildRiskKey(reportId, agentId, area) {
+  const safeArea = (area || "").trim().toLowerCase().replace(/\s+/g, "-");
+  return `${reportId || "no-report"}::${agentId || "no-agent"}::${safeArea}`;
+}
+
+const RISK_ITEM_STATUS_LABELS = {
+  open:            { label: "Open",             icon: "🔴" },
+  in_process:      { label: "In Process",       icon: "🟡" },
+  review:          { label: "Review",           icon: "🔵" },
+  closed_resolved: { label: "Closed / Resolved", icon: "✅" },
+  other:           { label: "Other",            icon: "⚪" },
+};
+
 const SECTION_COLOURS = {
   "Engagement Strategy":        { bg: "#eff6ff", border: "#2563eb", text: "#1e40af", icon: "📋" },
   "Planning Memorandum":        { bg: "#f0fdf4", border: "#16a34a", text: "#15803d", icon: "📝" },
@@ -21,6 +41,12 @@ const SECTION_COLOURS = {
   "Staffing Recommendations":   { bg: "#f0f9ff", border: "#0891b2", text: "#155e75", icon: "👥" },
   "Audit Planning Deliverables":{ bg: "#f8fafc", border: "#475569", text: "#1e293b", icon: "📊" },
 };
+
+// Ordered from lowest to highest risk. Used for deterministic stepping —
+// the AI is never asked to pick a new level itself, only to answer two
+// yes/no questions; the level change always comes from this fixed table,
+// so the same verdict always produces the same outcome, every time.
+const RISK_LEVEL_ORDER = ["Low", "Low-Medium", "Medium", "Medium-High", "High"];
 
 const RISK_LEVELS = {
   "high":            { pct: 90, bg: "#fee2e2", text: "#991b1b", bar: "#ef4444", needsGap: true  },
@@ -120,6 +146,18 @@ function isUnassessedRisk(raw = "") {
   return (raw || "").toLowerCase().trim() === "to be assessed";
 }
 
+// Deterministic level stepping. Same currentLabel + same steps ALWAYS
+// produces the same result — no AI involved in this calculation at all.
+function stepDownRiskLevel(currentLabel, steps) {
+  const normalized = (currentLabel || "").trim();
+  let index = RISK_LEVEL_ORDER.findIndex(
+    (l) => l.toLowerCase() === normalized.toLowerCase()
+  );
+  if (index === -1) index = RISK_LEVEL_ORDER.length - 1; // unknown/"To Be Assessed" -> treat as High for stepping purposes
+  const newIndex = Math.max(0, index - steps);
+  return RISK_LEVEL_ORDER[newIndex];
+}
+
 function extractText(node) {
   if (!node && node !== 0) return "";
   if (typeof node === "string" || typeof node === "number") return String(node);
@@ -146,16 +184,6 @@ function parseRiskRows(markdown = "") {
     }
     const cfg = getRisk(riskRaw);
     if (!cfg) continue;
-
-    // "To Be Assessed" rows mean the agent found no evidence either way in
-    // the uploaded document — this is NOT a confirmed finding, so it must
-    // not be counted as either a risk needing attention or an improved /
-    // low-risk area. Only genuinely-rated rows (High/Medium-High/Medium/
-    // Low-Medium/Low) belong in the Gap Analysis breakdown below. This
-    // keeps "Needs Attention" / "Improved" meaningful, and means the
-    // whole Gap Analysis panel simply won't render at all when a document
-    // produced zero genuine findings — which is correct, since there's
-    // nothing genuine to show.
     if (isUnassessedRisk(riskRaw)) continue;
 
     const item = {
@@ -193,12 +221,854 @@ function createSessionId() {
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
+// ── Table row helpers, shared by the row-rewrite logic below ──────────
+function isTableRowLine(line) {
+  if (!line.trim().startsWith("|")) return false;
+  if (/^\|[\s|:-]+\|/.test(line.trim())) return false;
+  const cells = line.split("|").map((c) => c.trim()).filter(Boolean);
+  return cells.length >= 3;
+}
+
+function getRowArea(line) {
+  const cells = line.split("|").map((c) => c.trim()).filter(Boolean);
+  return (cells[0] || "").trim().toLowerCase();
+}
+
+function findTableRowLineIndex(lines, targetArea) {
+  const normalize = (s) => (s || "").trim().toLowerCase();
+  const target = normalize(targetArea);
+  for (let i = 0; i < lines.length; i++) {
+    if (!isTableRowLine(lines[i])) continue;
+    if (getRowArea(lines[i]) === target) return i;
+  }
+  return -1;
+}
+
+// FIX (Bug B): the old note strings applyRiskVerdictToReport used to
+// write are fixed and known, so any previous one can be safely stripped
+// before appending the current verdict's note — preventing old and new
+// notes from piling up together in the same cell.
+const KNOWN_VERDICT_NOTES = [
+  "Resolved by uploaded evidence — fully addresses the planned response.",
+  "Partially addressed by uploaded evidence — some items remain outstanding.",
+  "Note: the uploaded document does not appear related to this risk — no change made.",
+];
+
+// SPECIFIC-GAP FEATURE: notes are now built dynamically from the AI's
+// specifically_addressed / still_outstanding fields (see
+// buildVerdictNote below), so they can no longer be matched against a
+// small fixed list. Every note we write is prefixed with this marker so
+// it can always be found and stripped, regardless of its exact wording.
+const VERDICT_NOTE_MARKER = "🤖 Evidence check —";
+
+function stripPreviousVerdictNote(text) {
+  let cleaned = text;
+  // New marker-based notes (this version onward): cut everything from
+  // the marker to the end of the cell.
+  const markerIndex = cleaned.indexOf(`— ${VERDICT_NOTE_MARKER}`);
+  if (markerIndex !== -1) {
+    cleaned = cleaned.slice(0, markerIndex);
+  }
+  // Legacy fixed-string notes (rows saved before this version) — kept
+  // for backward compatibility with reports generated previously.
+  for (const note of KNOWN_VERDICT_NOTES) {
+    cleaned = cleaned.split(` — ${note}`).join("");
+  }
+  return cleaned.trim();
+}
+
+// SPECIFIC-GAP FEATURE: builds a note that names the concrete fact the
+// evidence confirmed and, if the risk isn't fully resolved, the concrete
+// gap that remains — instead of a generic "partially addressed" label.
+// Falls back to the old generic wording if the agent hasn't been
+// updated yet or returns these fields empty, so this stays compatible
+// with the currently deployed agent.
+function buildVerdictNote(verdict) {
+  if (!verdict.relevant) {
+    return "the uploaded document does not appear related to this risk — no change made.";
+  }
+
+  const addressed   = (verdict.specifically_addressed || "").trim();
+  const outstanding = (verdict.still_outstanding || "").trim();
+
+  if (verdict.resolves_risk) {
+    return addressed
+      ? `Resolved — confirmed: ${addressed}.`
+      : "Resolved by uploaded evidence — fully addresses the planned response.";
+  }
+
+  if (addressed && outstanding) {
+    return `Partially addressed — confirmed: ${addressed}. Still outstanding: ${outstanding}.`;
+  }
+  if (addressed) {
+    return `Partially addressed — confirmed: ${addressed}. Some items remain outstanding.`;
+  }
+  return "Partially addressed by uploaded evidence — some items remain outstanding.";
+}
+
+// FIX: the risk LEVEL and the note both update as checklist items get
+// satisfied, but the "what it means simply" DESCRIPTION cell was never
+// touched by any rewrite path — so a risk could drop from 90% to 35%
+// while its description still read like the original unresolved
+// problem statement. This marker-based helper lets the checklist-
+// progress flow (only) also refresh that cell with a short status
+// summary, using the same strip-before-append pattern as the note
+// marker so repeated updates never pile up old status text.
+const DESCRIPTION_UPDATE_MARKER = "📌 Status update —";
+
+function stripPreviousDescriptionUpdate(text) {
+  const markerIndex = text.indexOf(`— ${DESCRIPTION_UPDATE_MARKER}`);
+  if (markerIndex !== -1) return text.slice(0, markerIndex).trim();
+  return text.trim();
+}
+
+// ── Deterministic row rewrite ───────────────────────────────────────────
+// Directly edits ONE table row's risk-level cell (and appends a short
+// note to the last cell) using plain string manipulation — no AI
+// involved in producing the new text at all. This guarantees: (a) every
+// OTHER row in the report is byte-for-byte untouched, and (b) the same
+// verdict always produces the exact same row text.
+//
+// descriptionUpdateText is OPTIONAL and only ever passed by the
+// checklist-progress flow (applyChecklistProgressToReport) — the
+// original whole-document verdict flow (applyRiskVerdictToReport) never
+// passes it, so that flow's behavior is completely unchanged.
+function rewriteRiskRow(line, newLevelLabel, noteText, descriptionUpdateText) {
+  // Raw split preserves the leading/trailing empty strings from a
+  // well-formed "| a | b | c | d |" row, so positions stay predictable.
+  const parts = line.split("|");
+  let riskCellIndex = -1;
+  for (let i = 1; i < parts.length - 1; i++) {
+    if (getRisk(parts[i].trim())) {
+      riskCellIndex = i;
+      break;
+    }
+  }
+  if (riskCellIndex !== -1) {
+    parts[riskCellIndex] = ` ${newLevelLabel} `;
+  }
+  // The description cell ("what it means simply") always immediately
+  // precedes the risk-level cell in the standard 4-column table.
+  if (descriptionUpdateText && riskCellIndex > 1) {
+    const descIndex = riskCellIndex - 1;
+    const existingDesc = stripPreviousDescriptionUpdate(parts[descIndex].trim());
+    parts[descIndex] = ` ${existingDesc} — ${DESCRIPTION_UPDATE_MARKER} ${descriptionUpdateText} `;
+  }
+  // Append the note to the last real (non-empty-trailing) cell — this is
+  // always the "What the auditor will check" / Response column.
+  let lastRealIndex = parts.length - 2; // parts[len-1] is the trailing "" after the final pipe
+  if (lastRealIndex >= 1 && noteText) {
+    const existing = stripPreviousVerdictNote(parts[lastRealIndex].trim());
+    parts[lastRealIndex] = ` ${existing} — ${VERDICT_NOTE_MARKER} ${noteText} `;
+  }
+  return parts.join("|");
+}
+
+function applyRiskVerdictToReport(oldMarkdown, targetArea, verdict, currentLevelLabel) {
+  if (!oldMarkdown) return oldMarkdown;
+  const lines = oldMarkdown.split("\n");
+  const rowIndex = findTableRowLineIndex(lines, targetArea);
+  if (rowIndex === -1) return oldMarkdown;
+
+  let newLevelLabel = currentLevelLabel;
+
+  if (!verdict.relevant) {
+    newLevelLabel = currentLevelLabel; // unchanged
+  } else if (verdict.resolves_risk) {
+    newLevelLabel = stepDownRiskLevel(currentLevelLabel, 2);
+  } else {
+    newLevelLabel = stepDownRiskLevel(currentLevelLabel, 1);
+  }
+
+  const note = buildVerdictNote(verdict);
+  lines[rowIndex] = rewriteRiskRow(lines[rowIndex], newLevelLabel, note);
+  return lines.join("\n");
+}
+
+// ── CHECKLIST FEATURE: progress-based row rewrite ──────────────────────
+// Instead of one all-or-nothing verdict, a risk can now have several
+// independent checklist items. This computes how many are done out of
+// the total and steps the risk level down from its ORIGINAL level
+// (checklistBaseLevel, captured once when the checklist was first
+// generated) — never from whatever the level currently is — so repeated
+// updates never compound on top of each other. The note names exactly
+// which items are still pending, satisfying the "show all risks, then
+// show which are still pending" requirement.
+function summarizeChecklistProgress(items) {
+  const total = items.length;
+  const doneItems = items.filter((i) => i.satisfied || i.manuallyChecked);
+  const pendingItems = items.filter((i) => !(i.satisfied || i.manuallyChecked));
+  const doneCount = doneItems.length;
+
+  let note;
+  if (total === 0) {
+    note = "";
+  } else if (doneCount === 0) {
+    note = `0 of ${total} checklist items satisfied yet.`;
+  } else if (doneCount === total) {
+    note = `All ${total} checklist items satisfied.`;
+  } else {
+    const pendingText = pendingItems.map((i) => i.text).join("; ");
+    note = `${doneCount} of ${total} checklist items satisfied. Still pending: ${pendingText}.`;
+  }
+
+  return { total, doneCount, note };
+}
+
+// FIX: the old flat two-tier scheme (1 step for "some done", 2 steps
+// only if "all done") meant 1-of-5 and 4-of-5 satisfied produced the
+// EXACT SAME risk level — clearly wrong, since 4/5 should read as
+// nearly resolved. This computes steps PROPORTIONALLY to how much of
+// the checklist is actually done, scaled against how many levels
+// separate the risk's ORIGINAL level from "Low" (never from whatever
+// the level currently is, so repeated updates never compound). Partial
+// completion is capped one step short of the fully-resolved level, so
+// "4 of 5 done" can never look identical to "5 of 5 done" — only a
+// complete checklist can reach the bottom level.
+function computeStepsFromChecklistProgress(baseLevel, doneCount, total) {
+  if (total === 0 || doneCount === 0) return 0;
+
+  const baseIndex = RISK_LEVEL_ORDER.findIndex(
+    (l) => l.toLowerCase() === (baseLevel || "").trim().toLowerCase()
+  );
+  const maxSteps = baseIndex === -1 ? RISK_LEVEL_ORDER.length - 1 : baseIndex;
+  if (maxSteps === 0) return 0; // already at the lowest level
+
+  if (doneCount === total) return maxSteps; // fully resolved -> drop straight to Low
+
+  const proportional = Math.round((doneCount / total) * maxSteps);
+  return Math.min(proportional, maxSteps - 1);
+}
+
+// FIX: builds a short status line reflecting how much of the checklist
+// is actually done, so the "what it means simply" description keeps up
+// with reality instead of forever reading like the original unresolved
+// problem — e.g. a risk sitting at 35% after 4/5 items confirmed should
+// no longer show a description that still sounds like nothing's been
+// done. Returns an empty string when nothing is done yet, so the
+// original description is left completely untouched in that case.
+function buildDescriptionStatusUpdate(doneCount, total) {
+  if (total === 0 || doneCount === 0) return "";
+  if (doneCount === total) {
+    return "All checklist items have now been confirmed — this risk has been substantially resolved.";
+  }
+  return `${doneCount} of ${total} checklist items confirmed so far — largely addressed, with the remaining item(s) still outstanding.`;
+}
+
+function applyChecklistProgressToReport(oldMarkdown, targetArea, baseLevel, items) {
+  if (!oldMarkdown) return oldMarkdown;
+  const lines = oldMarkdown.split("\n");
+  const rowIndex = findTableRowLineIndex(lines, targetArea);
+  if (rowIndex === -1) return oldMarkdown;
+
+  const { total, doneCount, note } = summarizeChecklistProgress(items);
+  if (total === 0) return oldMarkdown;
+
+  const steps = computeStepsFromChecklistProgress(baseLevel, doneCount, total);
+  const newLevelLabel = stepDownRiskLevel(baseLevel, steps);
+  const descriptionUpdate = buildDescriptionStatusUpdate(doneCount, total);
+  lines[rowIndex] = rewriteRiskRow(lines[rowIndex], newLevelLabel, note, descriptionUpdate);
+  return lines.join("\n");
+}
+
 // ─── Item Modal with Solutions ────────────────────────────────────────
-function ItemModal({ item, onClose }) {
+function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onRiskEvidenceRegenerated }) {
   const [showSolutions, setShowSolutions] = useState(false);
   if (!item) return null;
   const cfg       = getRisk(item.riskRaw);
   const solutions = getRiskSolutions(item.area);
+
+  const riskKey = buildRiskKey(reportId, agentId, item.area);
+  const [review, setReview]           = useState(null);
+  const [reviewLoading, setReviewLoading] = useState(true);
+  const [reviewError, setReviewError] = useState("");
+  const [saving, setSaving]           = useState(false);
+  const [uploading, setUploading]     = useState(false);
+  const [uploadStage, setUploadStage] = useState("");
+  const [lastVerdict, setLastVerdict] = useState(null);
+
+  // ── CHECKLIST FEATURE: local state ──────────────────────────────────
+  const checklistRequestedRef              = useRef(false);
+  const [checklistLoading, setChecklistLoading] = useState(false);
+  const [checklistError, setChecklistError]     = useState("");
+  const [itemUploadState, setItemUploadState]   = useState({}); // { [checklistItemId]: { uploading, stage } }
+  const [itemVerdicts, setItemVerdicts]         = useState({}); // { [checklistItemId]: verdict }
+  const [justificationOpenId, setJustificationOpenId] = useState(null);
+  const [justificationDraft, setJustificationDraft]   = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    checklistRequestedRef.current = false;
+    setReviewLoading(true);
+    setReviewError("");
+    setChecklistError("");
+    setItemUploadState({});
+    setItemVerdicts({});
+    setJustificationOpenId(null);
+    setJustificationDraft("");
+    fetch(RISK_API(riskKey))
+      .then((res) => res.json())
+      .then((data) => {
+        if (cancelled) return;
+        setReview(data);
+        // CHECKLIST FEATURE: generate the checklist exactly once, the
+        // first time this risk is opened with none saved yet. Reopening
+        // later will find checklistItems already populated and skip
+        // straight past this.
+        if (item.needsGap && (!data.checklistItems || data.checklistItems.length === 0)) {
+          generateChecklist();
+        }
+      })
+      .catch(() => { if (!cancelled) setReviewError("Could not load review status for this risk."); })
+      .finally(() => { if (!cancelled) setReviewLoading(false); });
+    return () => { cancelled = true; };
+  }, [riskKey]);
+
+  async function saveRiskUpdate(patch) {
+    setSaving(true);
+    setReviewError("");
+    try {
+      const res = await fetch(RISK_API(riskKey), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to save.");
+      setReview(data);
+      return data;
+    } catch (err) {
+      setReviewError(err.message || "Failed to save your update. Please try again.");
+      return null;
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function handleStatusChange(e) {
+    saveRiskUpdate({ status: e.target.value });
+  }
+
+  const [customStatusText, setCustomStatusText] = useState("");
+
+  useEffect(() => {
+    setCustomStatusText(review?.customStatusText || "");
+  }, [review?.customStatusText]);
+
+  function handleCustomStatusBlur() {
+    if (review?.status === "other") {
+      saveRiskUpdate({ status: "other", customStatusText });
+    }
+  }
+
+  const [newComment, setNewComment] = useState("");
+  const [savedConfirmation, setSavedConfirmation] = useState(false);
+
+  function handleAddComment() {
+    const text = newComment.trim();
+    if (!text) return;
+    saveRiskUpdate({ newComment: { author: "User", text } });
+    setNewComment("");
+  }
+
+  async function waitForRiskEvidenceDocument(fileName, existingIds) {
+    const normalize = (n) => (n || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    for (let attempt = 0; attempt < RISK_EVIDENCE_MAX_POLL_ATTEMPTS; attempt++) {
+      await sleep(RISK_EVIDENCE_POLL_INTERVAL_MS);
+      setUploadStage(`Extracting text from document… (${attempt + 1})`);
+      try {
+        const res  = await fetch(`${RISK_DOCUMENTS_API}?portal=user`);
+        const data = await res.json();
+        const list = data.reports || data.documents || data.items || [];
+        const match = list.find((doc) => {
+          const id = doc.reportId || doc.documentId || doc.document_id || "";
+          if (!id || existingIds.has(id)) return false;
+          const isDone = ["COMPLETED", "READY"].includes(doc.status || doc.processingStatus);
+          if (!isDone) return false;
+          const name = normalize(doc.source_file || doc.sourceFile || doc.fileName || doc.file_name || "");
+          return name && name.endsWith(normalize(fileName));
+        });
+        if (match) return match.reportId || match.documentId || match.document_id;
+      } catch {}
+    }
+    throw new Error("Document took too long to process. Please try again.");
+  }
+
+  // Generic job poller, shared by the whole-risk relevance check, the
+  // checklist-decomposition request, and per-item relevance checks.
+  // onTick (optional) is called once per poll attempt so the caller can
+  // update whatever stage indicator is relevant to it.
+  async function pollAgentJob(jobId, onTick) {
+    for (let attempt = 0; attempt < MAX_POLL_ATTEMPTS; attempt++) {
+      await sleep(POLL_INTERVAL_MS);
+      if (onTick) onTick(attempt);
+      let res;
+      try { res = await fetch(CHAT_STATUS_API(jobId)); } catch { continue; }
+      if (!res.ok && res.status !== 404) continue;
+      const data = await res.json();
+      if (data.status === "complete") return data;
+      if (data.status === "failed") throw new Error(data.error || "Request failed.");
+    }
+    throw new Error("This is taking longer than expected. Please check back shortly.");
+  }
+
+  // ── Deterministic relevance check for ONE newly uploaded document ────
+  // Calls the agent's narrow relevanceCheck route (see agentcore
+  // audit_planning_agent/app.py) which returns { relevant, resolves_risk,
+  // reason, specifically_addressed, still_outstanding } — never a full
+  // report. The frontend then computes the new risk level itself via a
+  // fixed lookup table (stepDownRiskLevel) and edits ONLY this risk's
+  // table row directly.
+  //
+  // IMPORTANT FIX: every other call to CHAT_API in this codebase always
+  // includes non-empty "message" and "question" fields. The upstream
+  // Lambda chain validates this and returns 400 Bad Request if they are
+  // missing — this call previously omitted them, which was the root
+  // cause of the "risk not reducing" bug. They are included below even
+  // though the agent's relevanceCheck branch itself does not read them.
+  async function checkRelevanceAndApply(evidenceReportId) {
+    setUploadStage("Checking whether this evidence resolves the risk…");
+    const placeholderMessage = `Check evidence relevance for "${item.area}".`;
+    const chatRes = await fetch(CHAT_API, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: placeholderMessage,
+        question: placeholderMessage,
+        sessionId: `risk-relevance-${Date.now()}`,
+        reportId: evidenceReportId,
+        reportIds: [evidenceReportId],
+        selectedAgent: agentId,
+        agent: agentId,
+        generalMode: false,
+        general_mode: false,
+        relevanceCheck: {
+          riskArea: item.area,
+          riskDescription: item.description,
+          plannedResponse: item.response || "",
+        },
+      }),
+    });
+    const chatData = await chatRes.json();
+    if (!chatRes.ok && chatRes.status !== 202) {
+      throw new Error(chatData.message || chatData.error || `Relevance check request failed (${chatRes.status}).`);
+    }
+    let final = chatData;
+    if (chatData.status === "processing" && chatData.jobId) {
+      final = await pollAgentJob(chatData.jobId, () =>
+        setUploadStage("Checking whether this evidence resolves the risk…")
+      );
+    }
+    const rawAnswer = final.answer || final.response || final.message || "";
+    let verdict;
+    try {
+      verdict = JSON.parse(rawAnswer);
+    } catch {
+      verdict = {
+        relevant: false,
+        resolves_risk: false,
+        reason: "Could not read the assessment result.",
+        specifically_addressed: "",
+        still_outstanding: "",
+      };
+    }
+    setLastVerdict(verdict);
+
+    const mergedContent = applyRiskVerdictToReport(
+      currentReportContent,
+      item.area,
+      verdict,
+      item.riskRaw
+    );
+    onRiskEvidenceRegenerated?.(mergedContent);
+    return verdict;
+  }
+
+  // ── Upload: saves file(s) as evidence, THEN runs the deterministic
+  // relevance check on each one and applies the result immediately.
+  // Supports multiple files at once.
+  async function handleFileSelect(e) {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0 || !reportId) return;
+    setUploading(true);
+    setReviewError("");
+    setLastVerdict(null);
+    try {
+      let existingIds = new Set();
+      try {
+        const snapRes  = await fetch(`${RISK_DOCUMENTS_API}?portal=user`);
+        const snapData = await snapRes.json();
+        const snapList = snapData.reports || snapData.documents || snapData.items || [];
+        existingIds = new Set(
+          snapList.map((d) => d.reportId || d.documentId || d.document_id).filter(Boolean)
+        );
+      } catch {}
+
+      for (const file of files) {
+        setUploadStage(`Uploading ${file.name}…`);
+        const urlRes = await fetch(RISK_ATTACHMENT_URL_API, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ file_name: file.name, content_type: file.type || "application/pdf" }),
+        });
+        const urlData   = await urlRes.json();
+        const uploadUrl = urlData.uploadUrl || urlData.upload_url || urlData.url || urlData.presignedUrl;
+        if (!uploadUrl) throw new Error(`Could not get an upload link for ${file.name}.`);
+
+        const putRes = await fetch(uploadUrl, {
+          method: "PUT",
+          headers: { "Content-Type": file.type || "application/pdf" },
+          body: file,
+        });
+        if (!putRes.ok) throw new Error(`Uploading ${file.name} to storage failed.`);
+
+        setUploadStage(`Extracting text from ${file.name}…`);
+        const evidenceReportId = await waitForRiskEvidenceDocument(file.name, existingIds);
+        existingIds.add(evidenceReportId);
+
+        await saveRiskUpdate({ newAttachment: { fileName: file.name, s3Key: evidenceReportId } });
+
+        // Run the deterministic relevance check for THIS document right
+        // away. If multiple files are uploaded together, each is
+        // checked in turn and the last one's verdict determines the
+        // final risk row state.
+        await checkRelevanceAndApply(evidenceReportId);
+      }
+    } catch (err) {
+      setReviewError(err.message || "Failed to attach the document. Please try again.");
+    } finally {
+      setUploading(false);
+      setUploadStage("");
+      e.target.value = "";
+    }
+  }
+
+  // ── Remove a wrongly-attached document ──────────────────────────────
+  async function handleRemoveAttachment(s3Key) {
+    await saveRiskUpdate({ removeAttachment: { s3Key } });
+  }
+
+  // Save now ONLY handles status/comments — it never triggers a
+  // re-analysis. Relevance checking happens automatically and exactly
+  // once per uploaded document, at upload time (see handleFileSelect).
+  async function handleManualSave() {
+    const pendingComment = newComment.trim();
+    const patch = { status: review?.status || "open" };
+    if (review?.status === "other") patch.customStatusText = customStatusText;
+    if (pendingComment) patch.newComment = { author: "User", text: pendingComment };
+    const result = await saveRiskUpdate(patch);
+    if (result) {
+      if (pendingComment) setNewComment("");
+      setSavedConfirmation(true);
+      setTimeout(() => setSavedConfirmation(false), 2500);
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // CHECKLIST FEATURE
+  // ═══════════════════════════════════════════════════════════════════
+
+  // Breaks this risk's Planned Response into a checklist of individually
+  // checkable items via the agent's riskChecklist route, then persists
+  // it. Guarded so it only ever runs once per risk (setChecklist on the
+  // backend also no-ops if a checklist already exists, as a second
+  // layer of protection against duplicate generation).
+  async function generateChecklist() {
+    if (checklistRequestedRef.current) return;
+    checklistRequestedRef.current = true;
+    setChecklistLoading(true);
+    setChecklistError("");
+    try {
+      const placeholderMessage = `Generate risk checklist for "${item.area}".`;
+      const chatRes = await fetch(CHAT_API, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: placeholderMessage,
+          question: placeholderMessage,
+          sessionId: `risk-checklist-${Date.now()}`,
+          reportId: reportId || null,
+          reportIds: reportId ? [reportId] : [],
+          selectedAgent: agentId,
+          agent: agentId,
+          generalMode: false,
+          general_mode: false,
+          riskChecklist: {
+            riskArea: item.area,
+            riskDescription: item.description,
+            plannedResponse: item.response || "",
+          },
+        }),
+      });
+      const chatData = await chatRes.json();
+      if (!chatRes.ok && chatRes.status !== 202) {
+        throw new Error(chatData.message || chatData.error || `Checklist request failed (${chatRes.status}).`);
+      }
+      let final = chatData;
+      if (chatData.status === "processing" && chatData.jobId) {
+        final = await pollAgentJob(chatData.jobId);
+      }
+      const rawAnswer = final.answer || final.response || final.message || "";
+      let parsed;
+      try { parsed = JSON.parse(rawAnswer); } catch { parsed = {}; }
+      const items = Array.isArray(parsed.items)
+        ? parsed.items.map((i) => String(i).trim()).filter(Boolean)
+        : [];
+      if (items.length === 0) {
+        setChecklistError("Could not break this risk into a checklist. Showing the standard planned response instead.");
+        return;
+      }
+      await saveRiskUpdate({ setChecklist: items, baseRiskLevel: item.riskRaw });
+    } catch (err) {
+      setChecklistError(err.message || "Failed to generate a checklist for this risk. Showing the standard planned response instead.");
+    } finally {
+      setChecklistLoading(false);
+    }
+  }
+
+  // Applies an update to ONE checklist item, then recomputes the risk's
+  // overall level/note from the FULL updated checklist and pushes that
+  // into the report — reusing applyChecklistProgressToReport so this is
+  // always derived fresh from all items' current state, never adjusted
+  // incrementally (which could drift or compound).
+  async function saveChecklistItemUpdate(itemId, patch) {
+    const result = await saveRiskUpdate({ updateChecklistItem: { id: itemId, ...patch } });
+    if (result) {
+      const baseLevel = result.checklistBaseLevel || item.riskRaw;
+      const mergedContent = applyChecklistProgressToReport(
+        currentReportContent,
+        item.area,
+        baseLevel,
+        result.checklistItems || []
+      );
+      onRiskEvidenceRegenerated?.(mergedContent);
+    }
+    return result;
+  }
+
+  // Checkbox click behaviour:
+  // - Evidence-satisfied items are locked; clicking does nothing.
+  // - Manually-checked items can be unchecked directly, no justification
+  //   needed to remove a manual override.
+  // - Unchecked items open the inline justification box instead of
+  //   toggling immediately, since a manual check requires an explanation.
+  function handleItemCheckboxClick(checklistItem) {
+    if (checklistItem.satisfied) return;
+    const isDone = checklistItem.satisfied || checklistItem.manuallyChecked;
+    if (isDone) {
+      saveChecklistItemUpdate(checklistItem.id, {
+        manuallyChecked: false,
+        satisfied: false,
+        justification: "",
+      });
+      return;
+    }
+    setJustificationOpenId(checklistItem.id);
+    setJustificationDraft("");
+  }
+
+  async function handleSaveJustification(checklistItem) {
+    const text = justificationDraft.trim();
+    if (!text) return;
+    await saveChecklistItemUpdate(checklistItem.id, {
+      manuallyChecked: true,
+      satisfied: true,
+      justification: text,
+    });
+    setJustificationOpenId(null);
+    setJustificationDraft("");
+  }
+
+  // Undoes a checklist item that was satisfied by the WRONG document (or
+  // a manual confirmation the user wants to retract). Resets the item
+  // back to unchecked/manual AND removes the associated attachment (if
+  // any) from the risk's attachment record in the same request, so a
+  // wrongly-uploaded file doesn't linger in the audit trail looking like
+  // valid evidence for this item.
+  async function handleCancelChecklistItem(checklistItem) {
+    const patch = {
+      updateChecklistItem: {
+        id: checklistItem.id,
+        satisfied: false,
+        satisfiedBy: null,
+        manuallyChecked: false,
+        justification: "",
+      },
+    };
+    if (checklistItem.satisfiedBy) {
+      patch.removeAttachment = { s3Key: checklistItem.satisfiedBy };
+    }
+    const result = await saveRiskUpdate(patch);
+    setItemVerdicts((prev) => ({ ...prev, [checklistItem.id]: null }));
+    if (result) {
+      const baseLevel = result.checklistBaseLevel || item.riskRaw;
+      const mergedContent = applyChecklistProgressToReport(
+        currentReportContent,
+        item.area,
+        baseLevel,
+        result.checklistItems || []
+      );
+      onRiskEvidenceRegenerated?.(mergedContent);
+    }
+  }
+
+  // Runs the same deterministic relevanceCheck route as the whole-risk
+  // upload, but scoped to ONE checklist item's text as the "planned
+  // response" being assessed — so the document is judged only against
+  // that single item, not the whole risk.
+  async function checkChecklistItemRelevance(checklistItem, evidenceReportId) {
+    const placeholderMessage = `Check evidence relevance for one checklist item under "${item.area}".`;
+    const chatRes = await fetch(CHAT_API, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: placeholderMessage,
+        question: placeholderMessage,
+        sessionId: `risk-item-relevance-${Date.now()}`,
+        reportId: evidenceReportId,
+        reportIds: [evidenceReportId],
+        selectedAgent: agentId,
+        agent: agentId,
+        generalMode: false,
+        general_mode: false,
+        relevanceCheck: {
+          riskArea: item.area,
+          riskDescription: item.description,
+          plannedResponse: checklistItem.text,
+        },
+      }),
+    });
+    const chatData = await chatRes.json();
+    if (!chatRes.ok && chatRes.status !== 202) {
+      throw new Error(chatData.message || chatData.error || `Relevance check failed (${chatRes.status}).`);
+    }
+    let final = chatData;
+    if (chatData.status === "processing" && chatData.jobId) {
+      final = await pollAgentJob(chatData.jobId, () =>
+        setItemUploadState((prev) => ({
+          ...prev,
+          [checklistItem.id]: { uploading: true, stage: "Checking this item against the document…" },
+        }))
+      );
+    }
+    const rawAnswer = final.answer || final.response || final.message || "";
+    try {
+      return JSON.parse(rawAnswer);
+    } catch {
+      return {
+        relevant: false,
+        resolves_risk: false,
+        reason: "Could not read the assessment result.",
+        specifically_addressed: "",
+        still_outstanding: "",
+      };
+    }
+  }
+
+  // Upload scoped to ONE checklist item. Saves the file as an
+  // attachment (so it still shows in the overall Supporting Documents
+  // list) AND checks it only against this one item's requirement.
+  async function handleItemFileSelect(checklistItem, e) {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0 || !reportId) return;
+    setItemUploadState((prev) => ({ ...prev, [checklistItem.id]: { uploading: true, stage: "" } }));
+    setItemVerdicts((prev) => ({ ...prev, [checklistItem.id]: null }));
+    try {
+      let existingIds = new Set();
+      try {
+        const snapRes  = await fetch(`${RISK_DOCUMENTS_API}?portal=user`);
+        const snapData = await snapRes.json();
+        const snapList = snapData.reports || snapData.documents || snapData.items || [];
+        existingIds = new Set(
+          snapList.map((d) => d.reportId || d.documentId || d.document_id).filter(Boolean)
+        );
+      } catch {}
+
+      // FIX: uploading several files at once used to unconditionally
+      // re-check EVERY file against this one item and overwrite its
+      // saved verdict each time — so if file #1 satisfied the item but
+      // file #2 (uploaded in the same batch) was unrelated, file #2's
+      // "not satisfied" result would incorrectly wipe out file #1's
+      // valid match. Once any file in this batch satisfies the item,
+      // remaining files are still uploaded/attached (for the record)
+      // but are no longer checked against — and never allowed to
+      // downgrade a satisfied item back to unsatisfied.
+      let alreadySatisfiedThisBatch = !!checklistItem.satisfied;
+
+      for (const file of files) {
+        setItemUploadState((prev) => ({
+          ...prev,
+          [checklistItem.id]: { uploading: true, stage: `Uploading ${file.name}…` },
+        }));
+        const urlRes = await fetch(RISK_ATTACHMENT_URL_API, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ file_name: file.name, content_type: file.type || "application/pdf" }),
+        });
+        const urlData   = await urlRes.json();
+        const uploadUrl = urlData.uploadUrl || urlData.upload_url || urlData.url || urlData.presignedUrl;
+        if (!uploadUrl) throw new Error(`Could not get an upload link for ${file.name}.`);
+
+        const putRes = await fetch(uploadUrl, {
+          method: "PUT",
+          headers: { "Content-Type": file.type || "application/pdf" },
+          body: file,
+        });
+        if (!putRes.ok) throw new Error(`Uploading ${file.name} to storage failed.`);
+
+        setItemUploadState((prev) => ({
+          ...prev,
+          [checklistItem.id]: { uploading: true, stage: `Extracting text from ${file.name}…` },
+        }));
+        const evidenceReportId = await waitForRiskEvidenceDocument(file.name, existingIds);
+        existingIds.add(evidenceReportId);
+
+        if (alreadySatisfiedThisBatch) {
+          // This item is already satisfied by an earlier file in this
+          // same upload — just record the attachment for the audit
+          // trail, without re-checking relevance or touching the
+          // checklist item's saved state at all.
+          await saveRiskUpdate({ newAttachment: { fileName: file.name, s3Key: evidenceReportId } });
+          continue;
+        }
+
+        setItemUploadState((prev) => ({
+          ...prev,
+          [checklistItem.id]: { uploading: true, stage: "Checking this item against the document…" },
+        }));
+        const verdict = await checkChecklistItemRelevance(checklistItem, evidenceReportId);
+        setItemVerdicts((prev) => ({ ...prev, [checklistItem.id]: verdict }));
+
+        const shouldSatisfy = !!(verdict.relevant && verdict.resolves_risk);
+        if (shouldSatisfy) alreadySatisfiedThisBatch = true;
+
+        const result = await saveRiskUpdate({
+          newAttachment: { fileName: file.name, s3Key: evidenceReportId },
+          updateChecklistItem: {
+            id: checklistItem.id,
+            satisfied: shouldSatisfy,
+            satisfiedBy: shouldSatisfy ? evidenceReportId : checklistItem.satisfiedBy || null,
+            justification: verdict.reason || "",
+          },
+        });
+        if (result) {
+          const baseLevel = result.checklistBaseLevel || item.riskRaw;
+          const mergedContent = applyChecklistProgressToReport(
+            currentReportContent,
+            item.area,
+            baseLevel,
+            result.checklistItems || []
+          );
+          onRiskEvidenceRegenerated?.(mergedContent);
+        }
+      }
+    } catch (err) {
+      setReviewError(err.message || "Failed to attach the document for this item. Please try again.");
+    } finally {
+      setItemUploadState((prev) => ({ ...prev, [checklistItem.id]: { uploading: false, stage: "" } }));
+      e.target.value = "";
+    }
+  }
 
   return (
     <div className="gap-modal-overlay" onClick={onClose}>
@@ -211,19 +1081,263 @@ function ItemModal({ item, onClose }) {
         </div>
 
         <div style={{ padding: "20px" }}>
-          <div className="single-risk-meter">
-            <div className="single-risk-label">Risk Level</div>
-            <div className="single-risk-bar-track">
-              <div className="single-risk-bar-fill"
-                style={{ width: `${item.pct}%`, background: cfg?.bar }} />
+          <div className="single-risk-meter"
+            style={{
+              background: "#ffffff",
+              border: "1px solid #e5e7eb",
+              borderRadius: 12,
+              padding: "14px 16px",
+              boxShadow: "0 1px 3px rgba(0,0,0,0.06)",
+            }}>
+            <div className="single-risk-label"
+              style={{ fontWeight: 700, fontSize: 13, color: "#334155", letterSpacing: 0.3, textTransform: "uppercase" }}>
+              Risk Level
             </div>
-            <div className="single-risk-pct" style={{ color: item.text }}>{item.pct}% risk</div>
+            <div className="single-risk-bar-track"
+              style={{
+                background: "#f1f5f9",
+                borderRadius: 999,
+                height: 12,
+                overflow: "hidden",
+                marginTop: 8,
+                boxShadow: "inset 0 1px 2px rgba(0,0,0,0.08)",
+              }}>
+              <div className="single-risk-bar-fill"
+                style={{
+                  width: `${item.pct}%`,
+                  background: `linear-gradient(90deg, ${cfg?.bar}cc, ${cfg?.bar})`,
+                  height: "100%",
+                  borderRadius: 999,
+                  transition: "width 0.5s cubic-bezier(0.4, 0, 0.2, 1)",
+                  boxShadow: `0 0 6px ${cfg?.bar}66`,
+                }} />
+            </div>
+            <div className="single-risk-pct"
+              style={{ color: item.text, fontWeight: 700, fontSize: 14, marginTop: 6 }}>
+              {item.pct}% risk
+            </div>
           </div>
 
           <div className="single-section">
             <div className="single-section-label">📄 Risk Description</div>
             <div className="single-section-body">{item.description}</div>
           </div>
+
+          {/* ══════════════════════════════════════════════════════════
+              CHECKLIST FEATURE: sits right after Risk Description, so
+              every sub-item making up this risk is visible immediately
+              — not tucked away further down near "How to Overcome This
+              Risk". Falls back to the plain Planned Response text if
+              the checklist couldn't be generated, so the modal never
+              breaks.
+              ══════════════════════════════════════════════════════════ */}
+          {item.needsGap && (
+            <div className="single-section attention-section">
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+                <div className="single-section-label" style={{ margin: 0 }}>📌 Planned Audit Response — Risk Areas</div>
+                {!checklistLoading && review?.checklistItems?.length > 0 && (() => {
+                  const { total, doneCount } = summarizeChecklistProgress(review.checklistItems);
+                  return (
+                    <span style={{
+                      fontSize: 12, fontWeight: 700, padding: "3px 10px", borderRadius: 999,
+                      background: doneCount === total ? "#dcfce7" : "#fef3c7",
+                      color: doneCount === total ? "#166534" : "#92400e",
+                    }}>
+                      {doneCount} / {total} satisfied
+                    </span>
+                  );
+                })()}
+              </div>
+
+              {!checklistLoading && review?.checklistItems?.length > 0 && (() => {
+                const { total, doneCount } = summarizeChecklistProgress(review.checklistItems);
+                const pct = total > 0 ? Math.round((doneCount / total) * 100) : 0;
+                return (
+                  <div style={{
+                    background: "#fef3c7", borderRadius: 999, height: 6, overflow: "hidden",
+                    marginTop: 10, marginBottom: 4,
+                  }}>
+                    <div style={{
+                      width: `${pct}%`, height: "100%", borderRadius: 999,
+                      background: doneCount === total ? "#22c55e" : "#f59e0b",
+                      transition: "width 0.4s ease",
+                    }} />
+                  </div>
+                );
+              })()}
+
+              {checklistLoading && (
+                <div className="single-section-body">Breaking this risk into checkable items…</div>
+              )}
+
+              {!checklistLoading && checklistError && (
+                <div className="single-section-body">
+                  {item.response}
+                  <div style={{ marginTop: 8, color: "#b91c1c", fontSize: 13 }}>⚠️ {checklistError}</div>
+                </div>
+              )}
+
+              {!checklistLoading && !checklistError && (!review?.checklistItems || review.checklistItems.length === 0) && (
+                <div className="single-section-body">{item.response}</div>
+              )}
+
+              {!checklistLoading && review?.checklistItems?.length > 0 && (
+                <div style={{ marginTop: 10 }}>
+                  {review.checklistItems.map((ci) => {
+                    const isDone = ci.satisfied || ci.manuallyChecked;
+                    const isLocked = ci.satisfied;
+                    const uploadState = itemUploadState[ci.id] || {};
+                    const verdict = itemVerdicts[ci.id];
+                    return (
+                      <div key={ci.id}
+                        style={{
+                          display: "flex", flexDirection: "column", gap: 8,
+                          padding: "13px 15px",
+                          marginBottom: 9,
+                          borderRadius: 10,
+                          border: isDone ? "1px solid #86efac" : "1px solid #fcd9a0",
+                          background: isDone ? "#f0fdf4" : "#fffaf0",
+                          boxShadow: "0 1px 2px rgba(0,0,0,0.04)",
+                          transition: "background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease",
+                        }}>
+                        <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+                          {isDone ? (
+                            <span
+                              title={isLocked ? "Automatically satisfied by uploaded evidence" : "Manually confirmed"}
+                              style={{
+                                display: "inline-flex", alignItems: "center", justifyContent: "center",
+                                width: 22, height: 22, borderRadius: "50%", flexShrink: 0, marginTop: 1,
+                                background: isLocked ? "#16a34a" : "#d97706",
+                                color: "#fff", fontSize: 13, fontWeight: 700,
+                                boxShadow: "0 1px 3px rgba(0,0,0,0.18)",
+                              }}
+                            >
+                              ✓
+                            </span>
+                          ) : (
+                            <input
+                              type="checkbox"
+                              checked={false}
+                              disabled={uploadState.uploading || saving}
+                              onChange={() => handleItemCheckboxClick(ci)}
+                              style={{ marginTop: 3, width: 17, height: 17, flexShrink: 0, cursor: "pointer", accentColor: "#f59e0b" }}
+                            />
+                          )}
+                          <div style={{ flex: 1 }}>
+                            <div style={{
+                              fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif",
+                              fontSize: 14.5,
+                              fontWeight: 500,
+                              lineHeight: 1.5,
+                              color: isDone ? "#14532d" : "#1f2937",
+                            }}>
+                              {ci.text}
+                            </div>
+
+                            {(ci.satisfied || (ci.manuallyChecked && !ci.satisfied)) && (
+                              <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6, flexWrap: "wrap" }}>
+                                {ci.satisfied && (
+                                  <div style={{
+                                    display: "inline-flex", alignItems: "center", gap: 4,
+                                    padding: "2px 9px", borderRadius: 999,
+                                    background: "#dcfce7", color: "#166534",
+                                    fontSize: 11.5, fontWeight: 600, letterSpacing: 0.2,
+                                  }}>
+                                    ✅ Satisfied by uploaded evidence
+                                  </div>
+                                )}
+                                {ci.manuallyChecked && !ci.satisfied && (
+                                  <div style={{
+                                    display: "inline-flex", alignItems: "center", gap: 4,
+                                    padding: "2px 9px", borderRadius: 999,
+                                    background: "#fef3c7", color: "#92400e",
+                                    fontSize: 11.5, fontWeight: 600, letterSpacing: 0.2,
+                                  }}>
+                                    ✍️ Manually confirmed
+                                  </div>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => handleCancelChecklistItem(ci)}
+                                  disabled={saving}
+                                  title="Uploaded the wrong document? Undo this item."
+                                  style={{
+                                    fontSize: 11.5, fontWeight: 600, color: "#b91c1c",
+                                    background: "transparent", border: "1px solid #fca5a5",
+                                    borderRadius: 999, padding: "2px 9px", cursor: "pointer",
+                                  }}
+                                >
+                                  ✕ Cancel
+                                </button>
+                              </div>
+                            )}
+                            {ci.manuallyChecked && !ci.satisfied && ci.justification && (
+                              <div style={{ marginTop: 5, fontSize: 12.5, color: "#78350f", fontStyle: "italic" }}>
+                                “{ci.justification}”
+                              </div>
+                            )}
+
+                            {!isDone && (
+                              <label className="risk-review-upload-btn"
+                                style={{ marginTop: 8, display: "inline-block", fontSize: 12, padding: "4px 10px" }}>
+                                <input
+                                  type="file"
+                                  multiple
+                                  onChange={(e) => handleItemFileSelect(ci, e)}
+                                  disabled={uploadState.uploading}
+                                  style={{ display: "none" }}
+                                />
+                                {uploadState.uploading ? (uploadState.stage || "Processing…") : "📎 Upload for this item"}
+                              </label>
+                            )}
+
+                            {verdict && !verdict.relevant && (
+                              <div style={{ fontSize: 12, color: "#92400e", marginTop: 6 }}>
+                                ⚠️ That document didn't appear related to this specific item.
+                              </div>
+                            )}
+                            {verdict && verdict.relevant && !verdict.resolves_risk && (
+                              <div style={{ fontSize: 12, color: "#92400e", marginTop: 6 }}>
+                                Related, but not conclusive yet — {verdict.still_outstanding || verdict.reason}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        {justificationOpenId === ci.id && (
+                          <div style={{ marginLeft: 34, display: "flex", flexDirection: "column", gap: 6 }}>
+                            <textarea
+                              className="risk-review-textarea"
+                              placeholder="Explain why this item is being marked done without uploaded evidence…"
+                              value={justificationDraft}
+                              onChange={(e) => setJustificationDraft(e.target.value)}
+                              rows={2}
+                            />
+                            <div style={{ display: "flex", gap: 8 }}>
+                              <button
+                                className="risk-review-comment-btn"
+                                onClick={() => handleSaveJustification(ci)}
+                                disabled={!justificationDraft.trim() || saving}
+                              >
+                                {saving ? "Saving…" : "Confirm"}
+                              </button>
+                              <button
+                                className="risk-review-attachment-remove"
+                                onClick={() => { setJustificationOpenId(null); setJustificationDraft(""); }}
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+          {/* ── END CHECKLIST FEATURE ─────────────────────────────────── */}
 
           {item.needsGap ? (
             <>
@@ -235,12 +1349,7 @@ function ItemModal({ item, onClose }) {
                   before an audit opinion can be issued.
                 </div>
               </div>
-              {item.response && (
-                <div className="single-section attention-section">
-                  <div className="single-section-label">📌 Planned Audit Response</div>
-                  <div className="single-section-body">{item.response}</div>
-                </div>
-              )}
+
               <div className="single-section"
                 style={{ background: "#fef2f2", borderColor: "#fca5a5" }}>
                 <div className="single-section-label">🔴 Management Action Required</div>
@@ -295,6 +1404,145 @@ function ItemModal({ item, onClose }) {
               </div>
             </>
           )}
+
+          {/* ══════════════════════════════════════════════════════════
+              ── ADD-ON: Per-Risk Review Status & Supporting Evidence ──
+              Everything below is new. Nothing above this line changed.
+              ══════════════════════════════════════════════════════════ */}
+
+          {lastVerdict && (
+            <div className="single-section"
+              style={{
+                background: lastVerdict.relevant ? "#eff6ff" : "#fffbeb",
+                borderColor: lastVerdict.relevant ? "#93c5fd" : "#fcd34d",
+              }}>
+              <div className="single-section-label">
+                {lastVerdict.relevant ? "🤖 AI Relevance Check — Relevant" : "🤖 AI Relevance Check — Not Related"}
+              </div>
+              <div className="single-section-body">
+                {!lastVerdict.relevant && (
+                  <strong>Note: this document does not appear related to this risk. Risk level unchanged.</strong>
+                )}
+                {lastVerdict.relevant && lastVerdict.resolves_risk && (
+                  <strong>This document fully resolves the risk. Risk level reduced by two steps (e.g. High → Medium).</strong>
+                )}
+                {lastVerdict.relevant && !lastVerdict.resolves_risk && (
+                  <strong>This document partially addresses the risk. Risk level reduced one step.</strong>
+                )}
+                <div style={{ marginTop: 6, fontStyle: "italic" }}>{lastVerdict.reason}</div>
+
+                {/* SPECIFIC-GAP FEATURE: show exactly what was confirmed
+                    and what's still missing, when the agent provides it.
+                    Safe to render even against the older deployed agent —
+                    these fields will simply be absent/empty and nothing
+                    extra shows. */}
+                {lastVerdict.relevant && lastVerdict.specifically_addressed && (
+                  <div style={{ marginTop: 8 }}>
+                    <strong>✅ Confirmed:</strong> {lastVerdict.specifically_addressed}
+                  </div>
+                )}
+                {lastVerdict.relevant && !lastVerdict.resolves_risk && lastVerdict.still_outstanding && (
+                  <div style={{ marginTop: 4 }}>
+                    <strong>⏳ Still outstanding:</strong> {lastVerdict.still_outstanding}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* NOTE: the old whole-risk upload control that lived here has
+              been removed — each checklist item above now has its own
+              scoped upload button, so a second, redundant upload control
+              for the whole risk is no longer needed. This section is now
+              a read-only record of what's been attached, for audit
+              trail purposes only. */}
+          {review?.attachments?.length > 0 && (
+            <div className="single-section risk-item-review-section">
+              <div className="single-section-label">📎 Attached Document(s)</div>
+              {reviewError && <div className="risk-review-error">⚠️ {reviewError}</div>}
+              <ul className="risk-review-attachment-list">
+                {review.attachments.map((a, i) => (
+                  <li key={i} className="risk-review-attachment-item">
+                    📎 {a.fileName}
+                    <span className="risk-review-attachment-meta">
+                      — {new Date(a.uploadedAt).toLocaleDateString()}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          <div className="single-section risk-item-review-section">
+            <div className="single-section-label">🗂️ Review Status</div>
+            {!reviewLoading && (
+              <>
+                <select
+                  className="risk-review-select"
+                  value={review?.status || "open"}
+                  onChange={handleStatusChange}
+                  disabled={saving}
+                >
+                  {Object.entries(RISK_ITEM_STATUS_LABELS).map(([value, { label, icon }]) => (
+                    <option key={value} value={value}>{icon} {label}</option>
+                  ))}
+                </select>
+                {review?.status === "other" && (
+                  <input
+                    type="text"
+                    className="risk-review-input"
+                    placeholder="Enter a custom status…"
+                    value={customStatusText}
+                    onChange={(e) => setCustomStatusText(e.target.value)}
+                    onBlur={handleCustomStatusBlur}
+                    style={{ marginTop: "8px" }}
+                  />
+                )}
+              </>
+            )}
+          </div>
+
+          <div className="single-section risk-item-review-section">
+            <div className="single-section-label">📝 Comments &amp; Justification</div>
+            {!reviewLoading && (
+              <>
+                {review?.comments?.length > 0 && (
+                  <div className="risk-review-comment-list">
+                    {review.comments.map((c, i) => (
+                      <div key={i} className="risk-review-comment">
+                        <div className="risk-review-comment-meta">
+                          <strong>{c.author}</strong> · {new Date(c.timestamp).toLocaleString()}
+                        </div>
+                        <div className="risk-review-comment-text">{c.text}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <textarea
+                  className="risk-review-textarea"
+                  placeholder="Enter your response, justification, or management comments…"
+                  value={newComment}
+                  onChange={(e) => setNewComment(e.target.value)}
+                  rows={3}
+                />
+                <button
+                  className="risk-review-comment-btn"
+                  onClick={handleAddComment}
+                  disabled={saving || !newComment.trim()}
+                >
+                  {saving ? "Saving…" : "Add comment"}
+                </button>
+              </>
+            )}
+          </div>
+
+          <div className="risk-review-save-row">
+            <button className="risk-review-save-btn" onClick={handleManualSave} disabled={saving || uploading}>
+              {saving ? "Saving…" : "💾 Save"}
+            </button>
+            {savedConfirmation && <span className="risk-review-saved-note">✅ Saved</span>}
+          </div>
+          {/* ── END ADD-ON ─────────────────────────────────────────── */}
 
           <button className="back-btn" onClick={onClose}>← Back to Report</button>
         </div>
@@ -408,12 +1656,6 @@ function RiskBadge({ rawText, onBadgeClick }) {
   const cfg = getRisk(rawText);
   if (!cfg) return <span>{rawText}</span>;
 
-  // "To Be Assessed" cells are informational, not a confirmed finding —
-  // they're excluded from the Gap Analysis data entirely (see
-  // parseRiskRows), so there is no matching item to open a details modal
-  // for. Showing a live-looking "⚠️ Details" button that silently does
-  // nothing when clicked is worse than showing no button at all, so this
-  // renders a plain neutral badge instead.
   if (isUnassessedRisk(rawText)) {
     return (
       <span className="risk-badge" style={{ background: cfg.bg, color: cfg.text }}>
@@ -544,6 +1786,35 @@ function Chatbot({
     ]);
   }
 
+  // Called from a risk's detail modal once the deterministic relevance
+  // check has updated this specific risk's row. Updates the currently
+  // displayed report message in place (re-parsing risk rows so the Gap
+  // Analysis panel reflects the change), and persists the new version
+  // via the same onReportGenerated callback normal generation already
+  // uses — which also keeps the Master Agent overview in sync.
+  function handleRiskEvidenceRegenerated(newRawContent) {
+    const content  = removeSourcesFromAnswer(newRawContent);
+    const audit    = isAuditReport(content);
+    const riskData = audit ? parseRiskRows(content) : null;
+    if (audit && onReportGenerated) onReportGenerated(content);
+    setMessages((prev) => {
+      const lastAuditIndex = [...prev].reverse().findIndex((m) => m.isAuditReport);
+      if (lastAuditIndex === -1) return prev;
+      const realIndex = prev.length - 1 - lastAuditIndex;
+      return prev.map((m, i) => (i === realIndex ? { ...m, content, isAuditReport: audit, riskData } : m));
+    });
+
+    // FIX (Bug A): refresh the currently-open modal's item so its risk
+    // bar/pct/response update immediately instead of only on next open.
+    if (riskData && modalItem) {
+      const allItems = [...riskData.needsAttention, ...riskData.improved];
+      const updated = allItems.find(
+        (it) => it.area.toLowerCase().trim() === modalItem.area.toLowerCase().trim()
+      );
+      if (updated) setModalItem(updated);
+    }
+  }
+
   // ── Mount / reportId change ──────────────────────────────────────────
   useEffect(() => {
     preShownRef.current = false;
@@ -607,10 +1878,6 @@ function Chatbot({
       return;
     }
 
-    // Background generation stopped without ever producing a result
-    // (e.g. it hit its retry limit or the runtime failed silently).
-    // Without this, the chat would otherwise be stuck showing "please
-    // wait" forever with the input disabled.
     if (wasGeneratingRef.current && !preGeneratedReport && !preShownRef.current) {
       wasGeneratingRef.current = false;
       if (!sendOnceRef.current) {
@@ -713,7 +1980,16 @@ function Chatbot({
 
   return (
     <section className={generalMode ? "chatbot-card chatbot-card-general" : "chatbot-card"}>
-      {modalItem && <ItemModal item={modalItem} onClose={() => setModalItem(null)} />}
+      {modalItem && (
+        <ItemModal
+          item={modalItem}
+          onClose={() => setModalItem(null)}
+          reportId={reportId}
+          agentId={agentId}
+          currentReportContent={[...messages].reverse().find((m) => m.isAuditReport)?.content || ""}
+          onRiskEvidenceRegenerated={handleRiskEvidenceRegenerated}
+        />
+      )}
 
       <div className="chatbot-messages">
         {messages.map((msg, i) => (

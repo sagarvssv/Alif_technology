@@ -96,6 +96,69 @@ def extract_risk_area(message: str) -> str:
             return area
     return ""
 
+# ─── Risk Checklist Decomposition (NEW) ──────────────────────────────
+# Breaks one risk's Planned Response into a short list of distinct,
+# independently-checkable items. This lets the frontend show each item
+# with its own checkbox and its own upload button, instead of treating
+# the whole risk as one all-or-nothing block.
+def decompose_risk_into_checklist(invoke_claude, risk_area, risk_description, planned_response):
+    system_prompt = """
+You are breaking down a single audit risk's Planned Response into a
+short checklist of distinct, individually-verifiable items. Respond
+with STRICT JSON only — no other text, no markdown code fences.
+
+Schema (exactly this one field):
+{
+  "items": ["first checkable item", "second checkable item", ...]
+}
+
+Rules:
+- Produce between 2 and 6 items. Most risks need 3-5.
+- Each item must describe ONE concrete, independently checkable fact or
+  condition drawn directly from the Planned Response and Risk
+  Description below (e.g. "Confirm the AED 98,400 balance owed by Al
+  Fahim Trading" or "Explain the AED 38,000 in deposits in transit").
+- Items must be genuinely separable — evidence could satisfy one
+  without satisfying the others.
+- Do NOT invent facts, customer names, or amounts not present in the
+  Risk Description or Planned Response text below. If specific names or
+  numbers are present, use them. If not, phrase items generically
+  around what the Planned Response asks the auditor to check.
+- Keep each item to one short sentence, plain English.
+- Never produce vague items like "review the situation" — every item
+  must be something a specific document could either satisfy or not.
+"""
+    user_prompt = f"""
+Risk area: {risk_area}
+Risk description: {risk_description}
+Planned Response: {planned_response}
+
+Return the JSON checklist now. Nothing else.
+"""
+    result = invoke_claude(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        max_tokens=400,
+        temperature=0,
+    )
+    cleaned = (result or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:].strip()
+    try:
+        parsed = json.loads(cleaned)
+        items = parsed.get("items", [])
+        items = [str(i).strip() for i in items if str(i).strip()]
+        if not items:
+            raise ValueError("empty checklist")
+        return items[:6]
+    except Exception:
+        # Fallback: treat the whole planned response as a single item so
+        # the feature degrades gracefully instead of breaking the modal.
+        return [planned_response.strip()] if planned_response.strip() else [
+            "Review and confirm this risk area."
+        ]
 
 # ─── Deterministic Evidence Relevance Check (PERMANENT FIX) ─────────────
 # Replaces the old approach of asking the AI to regenerate the ENTIRE
@@ -205,7 +268,23 @@ def run_agent(payload):
         get_message_from_payload,
         get_report_ids_from_payload,
     )
-
+    # ── Risk checklist decomposition route (checked first, same reason
+    # as the relevance-check route below — it only needs risk text, not
+    # any document context or general_mode gating). ────────────────────
+    risk_checklist_request = payload.get("riskChecklist")
+    if risk_checklist_request and isinstance(risk_checklist_request, dict):
+        items = decompose_risk_into_checklist(
+            invoke_claude=invoke_claude,
+            risk_area=risk_checklist_request.get("riskArea", ""),
+            risk_description=risk_checklist_request.get("riskDescription", ""),
+            planned_response=risk_checklist_request.get("plannedResponse", ""),
+        )
+        return build_response(
+            answer=json.dumps({"items": items}),
+            selected_agent=AGENT_NAME,
+            citations=[],
+            extra={"agentType": "risk_checklist", "agentName": "Audit Planning Agent"},
+        )
     # ── Deterministic relevance-check route (checked FIRST, before any
     # other routing, since it doesn't need the general_mode/report_ids
     # gating below — it only needs the single evidence document). ──────

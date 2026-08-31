@@ -19,7 +19,18 @@ CORS_HEADERS = {
     "Access-Control-Allow-Methods": "GET,PUT,POST,OPTIONS",
 }
 
-ALLOWED_STATUSES = ["open", "in_review", "resolved", "closed"]
+# Current, correct status vocabulary used everywhere in the frontend.
+ALLOWED_STATUSES = ["open", "in_process", "review", "closed_resolved", "other"]
+
+# Any risk record created before this vocabulary was introduced may still
+# have one of these old values stored in DynamoDB. Map them forward
+# automatically instead of rejecting the request, so old records don't
+# get permanently stuck erroring on every future update.
+LEGACY_STATUS_MAP = {
+    "in_review": "review",
+    "resolved": "closed_resolved",
+    "closed": "closed_resolved",
+}
 
 
 def now_iso():
@@ -34,10 +45,18 @@ def response(status_code, body):
     }
 
 
+def normalize_status(value):
+    """Maps a legacy status value forward to its current equivalent.
+    Values that are already current (or unrecognized) pass through
+    unchanged."""
+    return LEGACY_STATUS_MAP.get(value, value)
+
+
 def empty_review(risk_key):
     return {
         "riskKey": risk_key,
         "status": "open",
+        "customStatusText": "",
         "comments": [],
         "attachments": [],
         "statusHistory": [
@@ -55,7 +74,11 @@ def get_review(risk_key):
         return empty_review(risk_key)
     return {
         "riskKey": item.get("risk_key"),
-        "status": item.get("status", "open"),
+        # Normalize on read too, so any record saved under the old
+        # vocabulary before this fix displays correctly immediately,
+        # without needing a write first.
+        "status": normalize_status(item.get("status", "open")),
+        "customStatusText": item.get("custom_status_text", ""),
         "comments": item.get("comments", []),
         "attachments": item.get("attachments", []),
         "statusHistory": item.get("status_history", []),
@@ -73,8 +96,14 @@ def handle_get(risk_key):
 def handle_put(risk_key, body):
     """
     Body may include any of:
-      status: "open" | "in_review" | "resolved" | "closed"
+      status: "open" | "in_process" | "review" | "closed_resolved" | "other"
+      customStatusText: string (only meaningful when status is "other",
+        but accepted independently too so it can be updated without
+        also resending status on every keystroke/blur)
       newComment: { author, text }
+      newAttachment: { fileName, s3Key }
+      removeAttachment: { s3Key } — removes a previously attached
+        document, e.g. one added by mistake, before re-analysis is run.
       changedBy: string (who made this update, for status history)
     Each field is applied additively — a PUT only touches the fields it
     includes, so the frontend can update status and add a comment in the
@@ -88,6 +117,7 @@ def handle_put(risk_key, body):
 
     new_status = body.get("status")
     if new_status is not None:
+        new_status = normalize_status(new_status)
         if new_status not in ALLOWED_STATUSES:
             return response(400, {"error": f"status must be one of {ALLOWED_STATUSES}"})
         if new_status != existing["status"]:
@@ -95,6 +125,10 @@ def handle_put(risk_key, body):
                 {"status": new_status, "changedBy": changed_by, "changedAt": now_iso()}
             )
         existing["status"] = new_status
+
+    custom_status_text = body.get("customStatusText")
+    if custom_status_text is not None:
+        existing["customStatusText"] = custom_status_text
 
     new_comment = body.get("newComment")
     if new_comment and isinstance(new_comment, dict) and new_comment.get("text"):
@@ -117,6 +151,12 @@ def handle_put(risk_key, body):
             }
         )
 
+    remove_attachment = body.get("removeAttachment")
+    if remove_attachment and isinstance(remove_attachment, dict) and remove_attachment.get("s3Key"):
+        existing["attachments"] = [
+            a for a in existing["attachments"] if a.get("s3Key") != remove_attachment["s3Key"]
+        ]
+
     existing["lastUpdated"] = now_iso()
     if not existing.get("createdAt"):
         existing["createdAt"] = existing["lastUpdated"]
@@ -125,6 +165,7 @@ def handle_put(risk_key, body):
         Item={
             "risk_key": risk_key,
             "status": existing["status"],
+            "custom_status_text": existing.get("customStatusText", ""),
             "comments": existing["comments"],
             "attachments": existing["attachments"],
             "status_history": existing["statusHistory"],

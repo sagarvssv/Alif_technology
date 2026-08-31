@@ -77,6 +77,7 @@ def lambda_handler(event, context):
                 selected_agent=event.get("selected_agent", "audit_planning_agent"),
                 general_mode=event.get("general_mode", False),
                 relevance_check=event.get("relevance_check"),
+                risk_checklist=event.get("risk_checklist"),
             )
 
             update_job(
@@ -120,6 +121,7 @@ def invoke_agentcore_agent(
     selected_agent=None,
     general_mode=False,
     relevance_check=None,
+    risk_checklist=None,
 ):
     agent_key = selected_agent or "audit_planning_agent"
     runtime_config = AGENT_RUNTIME_CONFIG.get(agent_key) or AGENT_RUNTIME_CONFIG["audit_planning_agent"]
@@ -164,6 +166,13 @@ def invoke_agentcore_agent(
     if relevance_check:
         payload["relevanceCheck"] = relevance_check
 
+    # ── Risk checklist decomposition (ADD-ON) ───────────────────────────
+    # Same fix as relevance_check above — this function builds its own
+    # fixed payload dict, so risk_checklist must be added explicitly or
+    # it silently never reaches the agent.
+    if risk_checklist:
+        payload["riskChecklist"] = risk_checklist
+
     print("WORKER_INVOKING_AGENTCORE_AGENT:", agent_key)
     print("AGENTCORE_RUNTIME_ARN:", runtime_arn)
     print("AGENTCORE_QUALIFIER:", runtime_qualifier)
@@ -171,6 +180,7 @@ def invoke_agentcore_agent(
     print("SELECTED_AGENT:", selected_agent)
     print("GENERAL_MODE:", general_mode)
     print("RELEVANCE_CHECK:", bool(relevance_check))
+    print("RISK_CHECKLIST:", bool(risk_checklist))
     print("CONTEXT_LENGTH:", len(selected_report_context or ""))
 
     response = agentcore_runtime.invoke_agent_runtime(

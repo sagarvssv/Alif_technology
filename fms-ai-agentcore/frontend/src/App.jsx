@@ -528,6 +528,291 @@ function extractSection(markdown = "", heading = "") {
   return stripMarkdownEmphasis(collected.join(" ").trim());
 }
 
+// ── Project History drill-down helpers (ADD-ON) ────────────────────────
+// Pulls per-risk-area rows straight out of an agent's already-generated
+// report markdown — no extra API calls needed. Also picks up the
+// "N of M checklist items" progress phrase that the checklist feature
+// embeds directly into the row's cells, so the History drill-down can
+// show real supporting-evidence progress without querying the risk
+// review API separately for every single risk area.
+function extractRiskAreaSummaries(markdown = "") {
+  const KNOWN_LEVELS = ["high (presumed)", "high", "medium-high", "medium", "low-medium", "low"];
+  const rows = [];
+  const lines = (markdown || "").split("\n");
+  for (const line of lines) {
+    if (!line.trim().startsWith("|")) continue;
+    if (/^\|[\s|:-]+\|/.test(line.trim())) continue;
+    const cells = line.split("|").map((c) => c.trim()).filter(Boolean);
+    if (cells.length < 3) continue;
+    if (/^(risk\s*area|what it means|risk level|dimension|element|benchmark|role|item)/i.test(cells[0])) continue;
+
+    const area = cells[0];
+    const levelRaw = (cells[2] || "").toLowerCase();
+    if (levelRaw.includes("to be assessed")) continue;
+    if (!KNOWN_LEVELS.some((l) => levelRaw.includes(l))) continue;
+
+    const combinedText = cells.join(" | ");
+    let progress = null;
+    const partialMatch = combinedText.match(/(\d+)\s+of\s+(\d+)\s+checklist items/i);
+    if (partialMatch) {
+      progress = { done: parseInt(partialMatch[1], 10), total: parseInt(partialMatch[2], 10) };
+    } else {
+      const allMatch = combinedText.match(/all\s+(\d+)\s+checklist items/i);
+      if (allMatch) {
+        const total = parseInt(allMatch[1], 10);
+        progress = { done: total, total };
+      }
+    }
+
+    rows.push({ area, level: cells[2] || "", progress });
+  }
+  return rows;
+}
+
+function riskLevelPillStyle(levelRaw = "") {
+  const key = levelRaw.toLowerCase();
+  if (key.includes("high") && !key.includes("medium")) return { bg: "#fee2e2", color: "#991b1b" };
+  if (key.includes("medium-high")) return { bg: "#fed7aa", color: "#9a3412" };
+  if (key.includes("medium")) return { bg: "#fef3c7", color: "#92400e" };
+  if (key.includes("low-medium")) return { bg: "#d1fae5", color: "#065f46" };
+  if (key.includes("low")) return { bg: "#dcfce7", color: "#166534" };
+  return { bg: "#f1f5f9", color: "#475569" };
+}
+
+function buildRiskKeyForHistory(reportId, agentId, area) {
+  const safeArea = (area || "").trim().toLowerCase().replace(/\s+/g, "-");
+  return `${reportId || "no-report"}::${agentId || "no-agent"}::${safeArea}`;
+}
+
+const RISK_ITEM_STATUS_LABELS_HISTORY = {
+  open:            { label: "Open",             icon: "🔴" },
+  in_process:      { label: "In Process",       icon: "🟡" },
+  review:          { label: "Review",           icon: "🔵" },
+  closed_resolved: { label: "Closed / Resolved", icon: "✅" },
+  other:           { label: "Other",            icon: "⚪" },
+};
+
+// One risk area's row in the History drill-down. Pulls its REAL review
+// record (status + comments) from the same risk review API the main
+// risk modal uses — this is the piece that was missing before, when the
+// drill-down only showed risk level and progress parsed from report
+// text. Status and comment count show immediately (collapsed); the full
+// comment thread plus an "add comment" box appear on expand, so a
+// reviewer can leave a justification for a risk area that ISN'T yet
+// fully satisfied by uploaded evidence, right from this screen.
+function RiskAreaHistoryRow({ reportId, agentId, area, levelRaw, progress }) {
+  const riskKey = buildRiskKeyForHistory(reportId, agentId, area);
+  const [expanded, setExpanded] = useState(false);
+  const [review, setReview]     = useState(null);
+  const [loading, setLoading]   = useState(true);
+  const [newComment, setNewComment] = useState("");
+  const [saving, setSaving]     = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    fetch(RISK_API(riskKey))
+      .then((res) => res.json())
+      .then((data) => { if (!cancelled) setReview(data); })
+      .catch(() => {})
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [riskKey]);
+
+  async function handleAddComment() {
+    const text = newComment.trim();
+    if (!text) return;
+    setSaving(true);
+    try {
+      const res = await fetch(RISK_API(riskKey), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ newComment: { author: "Reviewer", text } }),
+      });
+      const data = await res.json();
+      setReview(data);
+      setNewComment("");
+    } catch {}
+    finally { setSaving(false); }
+  }
+
+  const pill        = riskLevelPillStyle(levelRaw);
+  const statusInfo  = RISK_ITEM_STATUS_LABELS_HISTORY[review?.status] || RISK_ITEM_STATUS_LABELS_HISTORY.open;
+  const commentCount = review?.comments?.length || 0;
+
+  return (
+    <div style={{
+      borderRadius: 8, background: "#f8fafc", marginBottom: 6, overflow: "hidden",
+      border: "1px solid #e2e8f0",
+    }}>
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        style={{
+          width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between",
+          padding: "10px 12px", background: "transparent", border: "none", cursor: "pointer",
+          textAlign: "left", gap: 10, flexWrap: "wrap",
+        }}
+      >
+        <div style={{ flex: 1, minWidth: 160 }}>
+          <div style={{ fontWeight: 600, fontSize: 13.5, color: "#1e293b" }}>{area}</div>
+          {progress && (
+            <div style={{ fontSize: 12, color: "#475569", marginTop: 2 }}>
+              {progress.done} / {progress.total} supporting items satisfied
+            </div>
+          )}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+          <span style={{
+            fontSize: 11.5, fontWeight: 700, padding: "3px 10px", borderRadius: 999,
+            background: pill.bg, color: pill.color, whiteSpace: "nowrap",
+          }}>
+            {levelRaw}
+          </span>
+          {!loading && (
+            <span style={{
+              fontSize: 11.5, fontWeight: 700, padding: "3px 10px", borderRadius: 999,
+              background: "#eef2ff", color: "#3730a3", whiteSpace: "nowrap",
+            }}>
+              {statusInfo.icon} {statusInfo.label}
+            </span>
+          )}
+          {!loading && commentCount > 0 && (
+            <span style={{
+              fontSize: 11.5, fontWeight: 700, padding: "3px 10px", borderRadius: 999,
+              background: "#f1f5f9", color: "#475569", whiteSpace: "nowrap",
+            }}>
+              💬 {commentCount}
+            </span>
+          )}
+          <span style={{ fontSize: 12, color: "#94a3b8" }}>{expanded ? "▲" : "▼"}</span>
+        </div>
+      </button>
+
+      {expanded && (
+        <div style={{ padding: "0 12px 14px 12px", borderTop: "1px solid #e2e8f0" }}>
+          {loading ? (
+            <p style={{ fontSize: 12.5, color: "#64748b", marginTop: 10 }}>Loading review status…</p>
+          ) : (
+            <div style={{ marginTop: 12 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 6 }}>
+                Comments &amp; Justification ({commentCount})
+              </div>
+              {commentCount > 0 ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 8 }}>
+                  {review.comments.map((c, i) => (
+                    <div key={i} style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 6, padding: "8px 10px" }}>
+                      <div style={{ fontSize: 11.5, color: "#64748b", marginBottom: 2 }}>
+                        <strong>{c.author}</strong> · {new Date(c.timestamp).toLocaleString()}
+                      </div>
+                      <div style={{ fontSize: 13, color: "#1e293b" }}>{c.text}</div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p style={{ fontSize: 12.5, color: "#94a3b8", marginBottom: 8 }}>
+                  No comments yet — add one below if this area needs a justification while evidence is still pending.
+                </p>
+              )}
+
+              <textarea
+                className="risk-review-textarea"
+                placeholder="Add a comment or justification for this risk area…"
+                value={newComment}
+                onChange={(e) => setNewComment(e.target.value)}
+                rows={2}
+                style={{ width: "100%" }}
+              />
+              <button
+                className="risk-review-comment-btn"
+                onClick={handleAddComment}
+                disabled={saving || !newComment.trim()}
+                style={{ marginTop: 6 }}
+              >
+                {saving ? "Saving…" : "Add comment"}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// The Level-2 drill-down: one uploaded document's agent results, each
+// with its risk areas and (where available) supporting-evidence
+// progress — pulled straight from the already-generated report content,
+// whether it's currently loaded in memory or only in the persisted
+// per-project cache.
+function DocumentHistoryDrilldown({ file, project, agentReportsByDoc, loadDocAgentCache }) {
+  const docId = file?.reportId;
+  const inMemory  = docId ? agentReportsByDoc[docId] : null;
+  const persisted = !inMemory && project && docId ? loadDocAgentCache(project.projectId, docId)?.agentReports : null;
+  const docState  = inMemory || persisted;
+
+  const agentDefs = [
+    { id: "audit_planning_agent", label: "Audit Planning Agent", icon: "📋" },
+    { id: "fs_review_agent",      label: "Financial Statement Review Agent", icon: "📊" },
+  ];
+
+  return (
+    <>
+      <div className="pf-header">
+        <div className="pf-title">📄 {file.name}</div>
+        <div className="pf-subtitle">
+          Uploaded {formatDate(file.uploadedAt)} — agent results and risk area progress for this document.
+        </div>
+      </div>
+
+      {!docState ? (
+        <p className="pdb-card-empty">No agent results available yet for this document.</p>
+      ) : (
+        agentDefs.map((agent) => {
+          const state   = docState[agent.id] || {};
+          const raw     = state.preGenerated?.answer || state.preGenerated?.response || state.preGenerated?.message || state.content || "";
+          const content = removeSourcesFromAnswer(raw);
+          const rows    = extractRiskAreaSummaries(content);
+          const isPreparing = !!state.preGenerating;
+          const isReady      = !!state.preGenerated || !!state.content;
+
+          return (
+            <div key={agent.id} style={{
+              background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12,
+              padding: "18px 20px", marginBottom: 16, boxShadow: "0 1px 3px rgba(0,0,0,0.05)",
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+                <span style={{ fontSize: 20 }}>{agent.icon}</span>
+                <span style={{ fontWeight: 700, fontSize: 15, color: "#0f172a" }}>{agent.label}</span>
+                {isPreparing && <span className="status-pill generating" style={{ marginLeft: "auto" }}>⏳ Preparing…</span>}
+                {!isPreparing && isReady && <span className="status-pill ready" style={{ marginLeft: "auto" }}>✅ Ready</span>}
+              </div>
+
+              {!isReady && !isPreparing && (
+                <p style={{ fontSize: 13, color: "#64748b", marginTop: 8 }}>Not yet generated for this document.</p>
+              )}
+
+              {rows.length > 0 && (
+                <div style={{ marginTop: 10 }}>
+                  {rows.map((row, i) => (
+                    <RiskAreaHistoryRow
+                      key={i}
+                      reportId={docId}
+                      agentId={agent.id}
+                      area={row.area}
+                      levelRaw={row.level}
+                      progress={row.progress}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })
+      )}
+    </>
+  );
+}
+
 // ─── Progress Bar ─────────────────────────────────────────────────────
 function ProcessingProgress({ progress, onCancel }) {
   return (
@@ -650,7 +935,7 @@ function FinancialIcon() {
 }
 
 // ─── History Entry Detail Modal ────────────────────────────────────────
-// Opened by clicking any line in the Alif Technologies — Project History list. Shows the full
+// Opened by clicking any line in the Project History list. Shows the full
 // note text, a human-readable action type, and the exact date/time —
 // everything currently tracked for a history entry.
 function HistoryDetailModal({ entry, onClose }) {
@@ -778,8 +1063,12 @@ function App() {
   // the render it was created in.
   const selectedReportIdRef = useRef("");
 
-  const [view,               setView]               = useState(VIEW_PORTAL);
-  const [portal,             setPortal]             = useState(null);
+  // ── PORTAL REMOVED ────────────────────────────────────────────────────
+  // The User Portal has been removed; this app now runs Audit Portal
+  // ONLY. The portal-selection screen is skipped entirely by starting
+  // directly in the Audit Portal's Projects view instead of VIEW_PORTAL.
+  const [view,               setView]               = useState(VIEW_PROJECTS);
+  const [portal,             setPortal]             = useState("audit");
   const [reports,            setReports]            = useState([]);
   const [selectedReport,     setSelectedReport]     = useState(null);
   const [selectedReportId,   setSelectedReportId]   = useState("");
@@ -794,6 +1083,10 @@ function App() {
   // Which uploaded files currently have their sidebar dropdown expanded.
   const [expandedFileIds,    setExpandedFileIds]    = useState(() => new Set());
   const [historyDetailItem, setHistoryDetailItem]   = useState(null);
+  // Which document is currently drilled into on the Project History
+  // screen (Level 2: agents + risk area progress). Null means show the
+  // Level 1 list of this project's documents instead.
+  const [historyDrillDoc, setHistoryDrillDoc]       = useState(null);
   const [qaPopupOpen,        setQaPopupOpen]        = useState(false);
   const [selectedProjectItem, setSelectedProjectItem] = useState(null);
   const [activeProjectAgent, setActiveProjectAgent]   = useState(null);
@@ -1068,6 +1361,27 @@ function App() {
     );
   }
 
+  // Clears this project's raw activity log entirely. Does NOT touch
+  // uploaded files or generated agent results — those live in separate
+  // fields (files / agentCachesByDoc) and are shown independently in the
+  // Project History drill-down, so clearing the log has no effect on
+  // what documents or agent results are available to browse.
+  function handleClearProjectHistory(project) {
+    if (!project) return;
+    if (!window.confirm("Clear all history entries for this project? This cannot be undone.")) return;
+    try {
+      const raw = localStorage.getItem("alif_projects_v1");
+      const list = raw ? JSON.parse(raw) : [];
+      const updated = list.map((p) =>
+        p.projectId === project.projectId ? { ...p, history: [] } : p
+      );
+      localStorage.setItem("alif_projects_v1", JSON.stringify(updated));
+    } catch {}
+    setSelectedProjectItem((prev) =>
+      prev && prev.projectId === project.projectId ? { ...prev, history: [] } : prev
+    );
+  }
+
   // ── Per-document agent report cache (per project) ────────────────────
   // Generated reports previously lived ONLY in React state and were keyed
   // per-agent, not per-document — so uploading a second file overwrote
@@ -1333,48 +1647,11 @@ function App() {
     }
   }
 
-  async function selectPortal(type) {
-    resetHistory();
-    setPortal(type);
-
-    // Switching portals always starts completely fresh — leftover
-    // project/document state from a previous portal must never bleed
-    // into a different portal's sidebar. Without this, opening the User
-    // Portal after having worked in the Audit Portal would still show the
-    // Audit Portal's uploaded documents and per-document agent dropdowns.
-    setSelectedProjectItem(null);
-    setActiveProjectAgent(null);
-    setSelectedAgent(null);
-    setSelectedReport(null);
-    setSelectedReportId("");
-    setAgentReports(emptyAgentReportState());
-    setAgentReportsByDoc({});
-    setExpandedFileIds(new Set());
-
-    if (type === "manager") {
-      const list = await fetchReports();
-      setReports(list);
-      setView(VIEW_MANAGER_HOME);
-    } else if (type === "audit") {
-      setView(VIEW_PROJECTS);
-    } else {
-      setView(VIEW_HOME);
-    }
-  }
-
   function startNewChat() {
     resetHistory();
-    if (portal === "manager") {
-      setView(VIEW_MANAGER_HOME);
-      setSelectedReport(null);
-      setSelectedReportId("");
-    } else if (portal === "audit") {
-      setView(VIEW_PROJECTS);
-      setSelectedProjectItem(null);
-      setActiveProjectAgent(null);
-    } else {
-      setView(VIEW_HOME);
-    }
+    setView(VIEW_PROJECTS);
+    setSelectedProjectItem(null);
+    setActiveProjectAgent(null);
     setSelectedAgent(null);
     setAgentReports(emptyAgentReportState());
     setError("");
@@ -1562,68 +1839,25 @@ function App() {
 
   useEffect(() => { return () => stopPolling(); }, []);
 
-  // ── PORTAL SELECTION ─────────────────────────────────────────────────
-  if (view === VIEW_PORTAL) {
-    return (
-      <div className="portal-screen">
-        <div className="portal-hero">
-          <div className="portal-logo">AT</div>
-          <h1 className="portal-title">Alif Technologies</h1>
-          <p className="portal-sub">FMS AI AgentCore — Enterprise Audit Intelligence Platform</p>
-        </div>
-        <p className="portal-prompt">Select your portal to continue</p>
-        <div className="portal-cards">
-          <button className="portal-card user-portal" onClick={() => selectPortal("user")}>
-            <div className="portal-card-icon">👤</div>
-            <div className="portal-card-body">
-              <div className="portal-card-title">User Portal</div>
-              <div className="portal-card-desc">
-                Upload your financial document and generate audit planning reports.
-                Ask questions about your own uploaded documents only.
-              </div>
-            </div>
-            <div className="portal-card-arrow">→</div>
-          </button>
-          <button className="portal-card audit-portal" onClick={() => selectPortal("audit")}>
-            <div className="portal-card-icon"><AuditShieldIcon size={28} /></div>
-            <div className="portal-card-body">
-              <div className="portal-card-title">Audit Portal</div>
-              <div className="portal-card-desc">
-                Organize your work by project. Create or open a project, then upload
-                documents and run agents scoped to that project.
-              </div>
-            </div>
-            <div className="portal-card-arrow">→</div>
-          </button>
-        </div>
-      </div>
-    );
-  }
-
   // ── MAIN APP ──────────────────────────────────────────────────────────
+  // NOTE: the portal-selection screen (VIEW_PORTAL) has been removed
+  // entirely along with the User Portal option. The app now always runs
+  // in Audit Portal mode, starting directly on the Projects view (see
+  // the initial useState values for `view`/`portal` above).
   return (
     <div className={`app-shell ${sidebarOpen ? "sidebar-open" : "sidebar-closed"}`}>
 
       <aside className="sidebar">
         <div className="brand-row">
-          <div className={`brand-logo-circle ${portal === "audit" ? "brand-logo-audit" : ""}`}>
-            {portal === "audit" ? <AuditShieldIcon size={20} /> : "AT"}
+          <div className="brand-logo-circle brand-logo-audit">
+            <AuditShieldIcon size={20} />
           </div>
           <div className="brand-text">
-            <span className="brand-name">Alif Technologies</span>
-            <span className="brand-sub">
-              {portal === "manager" ? "Manager Portal" : portal === "audit" ? "Audit Portal" : "User Portal"}
-            </span>
+            <span className="brand-name"></span>
+            <span className="brand-sub">Audit Portal</span>
           </div>
           <button className="sidebar-toggle" onClick={() => setSidebarOpen((o) => !o)}>◀</button>
         </div>
-
-        {portal === "manager" && (
-          <button className="new-chat-btn" onClick={startNewChat}>
-            <span className="new-chat-icon">＋</span>
-            <span className="new-chat-label">New Chat</span>
-          </button>
-        )}
 
         <button
           className={`sidebar-projects-btn ${view === VIEW_PROJECTS ? "sidebar-projects-active" : ""}`}
@@ -1633,64 +1867,7 @@ function App() {
           <span className="sidebar-projects-label">Projects</span>
         </button>
 
-        {/* ── User Portal: current document's agents ──────────────────
-            Once a document is uploaded (no project involved), this shows
-            Master Agent / Audit Planning Agent / Financial Statement
-            Review Agent directly in the sidebar with live Preparing/Ready
-            status — replacing the old separate "Report Analysis" picker
-            screen that used to show these same three options in the main
-            content area. */}
-        {portal === "user" && selectedReportId && (
-          <div className="sidebar-section sidebar-project-agents">
-            <div className="sidebar-section-title">Your Document</div>
-
-            <button
-              className={`sidebar-agent-btn ${view === VIEW_MASTER_AGENT ? "sidebar-agent-active" : ""}`}
-              onClick={() => navigateTo(VIEW_MASTER_AGENT)}
-            >
-              <span className="sidebar-agent-icon">🧠</span>
-              <span className="sidebar-agent-label">Master Agent</span>
-              {(agentReports.audit_planning_agent?.preGenerating || agentReports.fs_review_agent?.preGenerating) && (
-                <span className="sidebar-agent-status status-generating">Preparing</span>
-              )}
-              {!(agentReports.audit_planning_agent?.preGenerating || agentReports.fs_review_agent?.preGenerating) &&
-                agentReports.audit_planning_agent?.preGenerated && agentReports.fs_review_agent?.preGenerated && (
-                <span className="sidebar-agent-status status-ready">Ready</span>
-              )}
-            </button>
-
-            {SUB_AGENTS.map((agent) => (
-              <button
-                key={agent.id}
-                className={`sidebar-agent-btn ${selectedAgent?.id === agent.id && view === VIEW_AGENT ? "sidebar-agent-active" : ""} ${!agent.available ? "sidebar-agent-disabled" : ""}`}
-                disabled={!agent.available}
-                onClick={() => {
-                  if (!agent.available) return;
-                  setSelectedAgent(agent);
-                  updateAgentReport(agent.id, { content: "" });
-                  navigateTo(VIEW_AGENT);
-                }}
-              >
-                <span className="sidebar-agent-icon">{agent.icon}</span>
-                <span className="sidebar-agent-label">{agent.label}</span>
-                {agent.available ? (
-                  <>
-                    {agentReports[agent.id]?.preGenerating && (
-                      <span className="sidebar-agent-status status-generating">Preparing</span>
-                    )}
-                    {!agentReports[agent.id]?.preGenerating && agentReports[agent.id]?.preGenerated && (
-                      <span className="sidebar-agent-status status-ready">Ready</span>
-                    )}
-                  </>
-                ) : (
-                  <span className="sidebar-agent-status status-soon">Soon</span>
-                )}
-              </button>
-            ))}
-          </div>
-        )}
-
-        {portal === "audit" && selectedProjectItem && (
+        {selectedProjectItem && (
           <div className="sidebar-section sidebar-project-agents">
             <div className="sidebar-section-title">{selectedProjectItem.projectName}</div>
 
@@ -1797,35 +1974,9 @@ function App() {
           </div>
         )}
 
-        {portal === "manager" && (
-          <div className="sidebar-section">
-            <div className="sidebar-section-title">All Documents</div>
-            {loadingReports && <p className="sidebar-muted">Loading…</p>}
-            {!loadingReports && reports.length === 0 && (
-              <p className="sidebar-muted">No documents uploaded yet.</p>
-            )}
-            {reports.map((r) => {
-              const id = getReportId(r);
-              return (
-                <button key={id}
-                  className={`report-item ${selectedReportId === id ? "report-item-active" : ""}`}
-                  onClick={() => openManagerChat(r)}>
-                  <span className="report-item-icon">📑</span>
-                  <div className="report-item-text">
-                    <span className="report-item-name">{getReportName(r)}</span>
-                    <span className="report-item-date">{formatDate(r.createdAt || r.created_at)}</span>
-                  </div>
-                  <span className={`report-status-dot ${["COMPLETED","READY"].includes(r.status) ? "dot-green" : "dot-yellow"}`} />
-                </button>
-              );
-            })}
-          </div>
-        )}
-
         <div style={{ marginTop: "auto" }}>
-          <button className="switch-portal-btn"
-            onClick={() => { resetHistory(); setView(VIEW_PORTAL); setPortal(null); }}>
-            ← Switch Portal
+          <button className="switch-portal-btn" onClick={startNewChat}>
+            🔄 Start Over
           </button>
         </div>
       </aside>
@@ -1868,77 +2019,6 @@ function App() {
 
         {processing && <ProcessingProgress progress={processingProgress} onCancel={handleCancelProcessing} />}
 
-        {/* USER HOME */}
-        {view === VIEW_HOME && (
-          <div className="home-view">
-            <div className="home-hero">
-              <div className="home-hero-logo">AT</div>
-              <h1 className="home-hero-title">Alif Technologies</h1>
-              <p className="home-hero-sub">FMS AI AgentCore — Enterprise Audit Intelligence Platform</p>
-              <div className="portal-badge">👤 User Portal</div>
-            </div>
-            <p className="home-prompt">What would you like to do today?</p>
-            <div className="home-options">
-              <label className="home-option-card upload-card">
-                <input ref={fileInputRef} type="file" multiple
-                  accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg"
-                  onChange={handleMultiUpload} disabled={uploading || processing} />
-                <div className="option-icon"><UploadBoxIcon /></div>
-                <div className="option-body">
-                  <div className="option-title">Upload Financial Document(s)</div>
-                  <div className="option-desc">
-                    Upload one or more financial statements — select several at once
-                    with the ➕ picker. Each document gets its own independent Master
-                    Agent, Audit Planning, and Financial Statement Review results.
-                  </div>
-                </div>
-                <div className="option-arrow">→</div>
-              </label>
-            </div>
-            {uploading && <div className="home-status">⬆️ Uploading your document…</div>}
-          </div>
-        )}
-
-        {/* MANAGER HOME */}
-        {view === VIEW_MANAGER_HOME && (
-          <div className="manager-home-view">
-            <div className="manager-home-hero">
-              <div className="manager-home-icon">🏢</div>
-              <h2 className="manager-home-title">Manager Portal</h2>
-              <p className="manager-home-desc">
-                Select a document from the list below to open it and ask questions.
-                The AI will answer based on that specific document only.
-              </p>
-            </div>
-            {loadingReports && <p className="manager-loading">Loading documents…</p>}
-            {!loadingReports && reports.length === 0 && (
-              <div className="manager-empty">
-                <div className="manager-empty-icon">📭</div>
-                <p>No documents have been uploaded yet.</p>
-              </div>
-            )}
-            <div className="manager-doc-grid">
-              {reports.map((r) => {
-                const id   = getReportId(r);
-                const done = ["COMPLETED","READY"].includes(r.status || r.processingStatus);
-                return (
-                  <button key={id} className="manager-doc-card" onClick={() => openManagerChat(r)}>
-                    <div className="manager-doc-icon">📑</div>
-                    <div className="manager-doc-body">
-                      <div className="manager-doc-name">{getReportName(r)}</div>
-                      <div className="manager-doc-date">{formatDate(r.createdAt || r.created_at)}</div>
-                      <div className={`manager-doc-status ${done ? "status-done" : "status-pending"}`}>
-                        {done ? "✅ Ready" : "⏳ Processing"}
-                      </div>
-                    </div>
-                    <div className="manager-doc-open">Open →</div>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
         {view === VIEW_RISK_REVIEW && (
           <div className="chatbot-view">
             <div className="chatbot-nav-bar">
@@ -1955,25 +2035,12 @@ function App() {
           </div>
         )}
 
-        {/* MANAGER CHAT */}
-        {view === VIEW_MANAGER_CHAT && (
-          <div className="chatbot-view">
-            <div className="chatbot-nav-bar">
-              <button className="back-nav-btn"
-                onClick={() => { goBack(VIEW_MANAGER_HOME); setSelectedReport(null); setSelectedReportId(""); }}>
-                ← Back to Documents
-              </button>
-            </div>
-            <Chatbot reportId={selectedReportId} selectedReport={selectedReport} managerMode />
-          </div>
-        )}
-
         {/* MASTER AGENT */}
         {view === VIEW_MASTER_AGENT && (
           <div className="chatbot-view">
             <div className="chatbot-nav-bar">
               <button className="back-nav-btn"
-                onClick={() => goBack(selectedProjectItem ? VIEW_PROJECT_DETAIL : VIEW_HOME)}>
+                onClick={() => goBack(selectedProjectItem ? VIEW_PROJECT_DETAIL : VIEW_PROJECTS)}>
                 {selectedProjectItem ? "← Back to Project" : "← Back"}
               </button>
             </div>
@@ -2023,16 +2090,6 @@ function App() {
         {/* PROJECTS */}
         {view === VIEW_PROJECTS && (
           <div className="chatbot-view">
-            <div className="chatbot-nav-bar">
-              <button className="back-nav-btn"
-                onClick={() => {
-                  const fallback = portal === "manager" ? VIEW_MANAGER_HOME : portal === "audit" ? VIEW_PORTAL : VIEW_HOME;
-                  const target = goBack(fallback);
-                  if (target === VIEW_PORTAL) setPortal(null);
-                }}>
-                ← Back
-              </button>
-            </div>
             <Projects
               onOpenProject={(project) => {
                 setSelectedProjectItem(project);
@@ -2048,6 +2105,7 @@ function App() {
                 }
                 setAgentReportsByDoc(restored);
                 setExpandedFileIds(new Set());
+                setHistoryDrillDoc(null);
 
                 const files = project.files || [];
                 if (files.length > 0 && files[0].reportId) {
@@ -2177,50 +2235,69 @@ function App() {
               <HistoryDetailModal entry={historyDetailItem} onClose={() => setHistoryDetailItem(null)} />
             )}
             <div className="chatbot-nav-bar chatbot-nav-bar-split">
-              <button className="back-nav-btn" onClick={() => goBack(VIEW_PROJECT_DETAIL)}>
-                ← Back to Project
+              <button className="back-nav-btn" onClick={() => {
+                if (historyDrillDoc) { setHistoryDrillDoc(null); return; }
+                goBack(VIEW_PROJECT_DETAIL);
+              }}>
+                {historyDrillDoc ? "← Back to Documents" : "← Back to Project"}
               </button>
-              <button
-                className="download-history-btn"
-                onClick={() => handleDownloadProjectHistory(selectedProjectItem)}
-              >
-                ⬇ Download PDF
-              </button>
+              <div style={{ display: "flex", gap: 10 }}>
+                <button
+                  className="download-history-btn"
+                  onClick={() => handleDownloadProjectHistory(selectedProjectItem)}
+                >
+                  ⬇ Download PDF
+                </button>
+                <button
+                  className="download-history-btn"
+                  style={{ background: "#fef2f2", color: "#b91c1c", border: "1px solid #fecaca" }}
+                  onClick={() => handleClearProjectHistory(selectedProjectItem)}
+                >
+                  🗑️ Clear History
+                </button>
+              </div>
             </div>
 
             <div className="pd-view">
-              <div className="pf-header">
-                <div className="pf-title">Project History</div>
-                <div className="pf-subtitle">
-                  Every action performed on <strong>{selectedProjectItem.projectName}</strong>. Click any entry for details.
-                </div>
-              </div>
+              {!historyDrillDoc ? (
+                <>
+                  <div className="pf-header">
+                    <div className="pf-title">Project History</div>
+                    <div className="pf-subtitle">
+                      Documents uploaded to <strong>{selectedProjectItem.projectName}</strong>. Click a document to see its agent
+                      results and how many risk areas have been satisfied.
+                    </div>
+                  </div>
 
-              {Array.isArray(selectedProjectItem.history) && selectedProjectItem.history.length > 0 ? (
-                <div className="pd-history-card">
-                  <div className="chrome-history">
-                    {groupHistoryByDate(selectedProjectItem.history).map((group) => (
-                      <div className="chrome-history-group" key={group.dateObj.toISOString()}>
-                        <div className="chrome-history-date">{group.label}</div>
+                  {(!selectedProjectItem.files || selectedProjectItem.files.length === 0) ? (
+                    <p className="pdb-card-empty">No documents uploaded yet.</p>
+                  ) : (
+                    <div className="pd-history-card">
+                      <div className="chrome-history">
                         <ul className="chrome-history-list">
-                          {group.entries.map((h, i) => (
+                          {selectedProjectItem.files.map((f) => (
                             <li
-                              key={i}
+                              key={f.fileId}
                               className="chrome-history-row chrome-history-row-clickable"
-                              onClick={() => setHistoryDetailItem(h)}
+                              onClick={() => setHistoryDrillDoc(f)}
+                              style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}
                             >
-                              <span className="chrome-history-time">{formatTimeOnly(h.timestamp)}</span>
-                              <span className="chrome-history-dot" />
-                              <span className="chrome-history-text">{h.note || historyActionLabel(h.action)}</span>
+                              <span className="chrome-history-text">📄 {f.name}</span>
+                              <span style={{ fontSize: 12, color: "#64748b" }}>{formatDate(f.uploadedAt)}</span>
                             </li>
                           ))}
                         </ul>
                       </div>
-                    ))}
-                  </div>
-                </div>
+                    </div>
+                  )}
+                </>
               ) : (
-                <p className="pdb-card-empty">No history recorded yet.</p>
+                <DocumentHistoryDrilldown
+                  file={historyDrillDoc}
+                  project={selectedProjectItem}
+                  agentReportsByDoc={agentReportsByDoc}
+                  loadDocAgentCache={loadDocAgentCache}
+                />
               )}
             </div>
           </div>

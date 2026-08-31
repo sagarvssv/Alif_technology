@@ -89,6 +89,155 @@ def extract_issue_area(message: str) -> str:
     return ""
 
 
+# ─── Risk Checklist Decomposition (PORTED FROM audit_planning_agent) ────
+# Same deterministic pattern as the Audit Planning Agent: breaks one
+# finding's Recommendation into a short list of distinct, independently-
+# checkable items, so the frontend can show each with its own checkbox
+# and its own upload button instead of one all-or-nothing block.
+def decompose_risk_into_checklist(invoke_claude, risk_area, risk_description, planned_response):
+    system_prompt = """
+You are breaking down a single financial statement review finding's
+Recommendation into a short checklist of distinct, individually-
+verifiable items. Respond with STRICT JSON only — no other text, no
+markdown code fences.
+
+Schema (exactly this one field):
+{
+  "items": ["first checkable item", "second checkable item", ...]
+}
+
+Rules:
+- Produce between 2 and 6 items. Most findings need 3-5.
+- Each item must describe ONE concrete, independently checkable fact or
+  condition drawn directly from the Recommendation and Issue description
+  below (e.g. "Confirm the AED 98,400 balance owed by Al Fahim Trading"
+  or "Obtain the missing accounting policy note for inventory").
+- Items must be genuinely separable — evidence could satisfy one
+  without satisfying the others.
+- Do NOT invent facts, standard references, or amounts not present in
+  the Issue or Recommendation text below. If specific names or numbers
+  are present, use them. If not, phrase items generically around what
+  the Recommendation asks the reviewer to check.
+- Keep each item to one short sentence, plain English.
+- Never produce vague items like "review the situation" — every item
+  must be something a specific document could either satisfy or not.
+"""
+    user_prompt = f"""
+Issue: {risk_area}
+Standard Reference / details: {risk_description}
+Recommendation: {planned_response}
+
+Return the JSON checklist now. Nothing else.
+"""
+    result = invoke_claude(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        max_tokens=400,
+        temperature=0,
+    )
+    cleaned = (result or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:].strip()
+    try:
+        parsed = json.loads(cleaned)
+        items = parsed.get("items", [])
+        items = [str(i).strip() for i in items if str(i).strip()]
+        if not items:
+            raise ValueError("empty checklist")
+        return items[:6]
+    except Exception:
+        return [planned_response.strip()] if planned_response.strip() else [
+            "Review and confirm this finding."
+        ]
+
+
+# ─── Deterministic Evidence Relevance Check (PORTED FROM audit_planning_agent) ─
+# Same two-question, no-AI-invented-numbers approach: ask ONLY whether a
+# document is relevant to ONE finding/item and whether it fully resolves
+# it. The frontend computes the new risk level itself via its own fixed
+# lookup table — this function never returns a risk level.
+def assess_evidence_relevance(invoke_claude, risk_area, risk_description, planned_response, evidence_text):
+    system_prompt = """
+You are assessing whether a specific document is relevant evidence for a
+specific financial statement review finding. Respond with STRICT JSON
+only — no other text, no markdown code fences, no explanation outside
+the JSON object.
+
+Schema (exactly these five fields, nothing else):
+{
+  "relevant": true or false,
+  "resolves_risk": true or false,
+  "reason": "one short sentence explaining your decision",
+  "specifically_addressed": "what part of the finding this document actually confirms, in plain terms — empty string if not relevant",
+  "still_outstanding": "what part of the Recommendation remains unconfirmed or unexplained by this document — empty string if fully resolved or not relevant"
+}
+
+Rules:
+- "relevant" = false if the document has nothing meaningfully to do with
+  this specific finding (e.g. a trade license uploaded for a going
+  concern finding, or a VAT return uploaded for a related party
+  disclosure finding). If relevant is false, resolves_risk MUST also be
+  false, and both specifically_addressed and still_outstanding MUST be
+  empty strings.
+- "relevant" = true if the document discusses, confirms, explains, or
+  directly addresses this finding's subject matter, even partially.
+- "resolves_risk" = true ONLY if the document fully and directly answers
+  everything described in the Recommendation below — every number,
+  every condition, with no gaps remaining. In this case
+  still_outstanding MUST be an empty string.
+- "resolves_risk" = false if the document is relevant but leaves any
+  part of the Recommendation unaddressed or unconfirmed.
+- "specifically_addressed" must name the CONCRETE fact confirmed, not a
+  vague summary. This is required whenever relevant is true.
+- "still_outstanding" must name the CONCRETE gap that remains. This is
+  required whenever relevant is true and resolves_risk is false.
+- Be decisive. Do not hedge. Pick true or false for each boolean field.
+- Never invent facts not present in the evidence document text.
+"""
+    user_prompt = f"""
+Issue: {risk_area}
+Standard Reference / details: {risk_description}
+Recommendation (exactly what evidence would need to show to resolve this finding):
+{planned_response}
+
+Evidence document text (this is the ONLY document being assessed):
+{evidence_text}
+
+Return the JSON assessment now. Nothing else.
+"""
+    result = invoke_claude(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        max_tokens=300,
+        temperature=0,
+    )
+    cleaned = (result or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:].strip()
+    try:
+        parsed = json.loads(cleaned)
+        is_relevant = bool(parsed.get("relevant", False))
+        return {
+            "relevant": is_relevant,
+            "resolves_risk": bool(parsed.get("resolves_risk", False)) if is_relevant else False,
+            "reason": str(parsed.get("reason", "")).strip() or "No reason provided.",
+            "specifically_addressed": str(parsed.get("specifically_addressed", "")).strip() if is_relevant else "",
+            "still_outstanding": str(parsed.get("still_outstanding", "")).strip() if is_relevant else "",
+        }
+    except Exception:
+        return {
+            "relevant": False,
+            "resolves_risk": False,
+            "reason": "Could not determine relevance — the assessment could not be parsed. Treating as not relevant to avoid an incorrect risk reduction.",
+            "specifically_addressed": "",
+            "still_outstanding": "",
+        }
+
+
 def run_agent(payload):
     prepare_imports()
 
@@ -102,6 +251,50 @@ def run_agent(payload):
         get_message_from_payload,
         get_report_ids_from_payload,
     )
+
+        # ── Risk checklist decomposition route (checked first, same reason
+    # as the relevance-check route below — it only needs finding text,
+    # not any document context or general_mode gating). ────────────────
+    risk_checklist_request = payload.get("riskChecklist")
+    if risk_checklist_request and isinstance(risk_checklist_request, dict):
+        items = decompose_risk_into_checklist(
+            invoke_claude=invoke_claude,
+            risk_area=risk_checklist_request.get("riskArea", ""),
+            risk_description=risk_checklist_request.get("riskDescription", ""),
+            planned_response=risk_checklist_request.get("plannedResponse", ""),
+        )
+        return build_response(
+            answer=json.dumps({"items": items}),
+            selected_agent=AGENT_NAME,
+            citations=[],
+            extra={"agentType": "risk_checklist", "agentName": "Financial Statement Review Agent"},
+        )
+
+    # ── Deterministic relevance-check route (checked before any other
+    # routing, since it doesn't need the general_mode/report_ids gating
+    # below — it only needs the single evidence document). ─────────────
+    relevance_check = payload.get("relevanceCheck")
+    if relevance_check and isinstance(relevance_check, dict):
+        evidence_report_ids = get_report_ids_from_payload(payload)
+        direct_context_rc = get_direct_context_from_payload(payload)
+        evidence_text = get_combined_report_context(
+            report_ids=evidence_report_ids, direct_context=direct_context_rc
+        )
+        evidence_text = compact_text(evidence_text, max_chars=12000)
+
+        verdict = assess_evidence_relevance(
+            invoke_claude=invoke_claude,
+            risk_area=relevance_check.get("riskArea", ""),
+            risk_description=relevance_check.get("riskDescription", ""),
+            planned_response=relevance_check.get("plannedResponse", ""),
+            evidence_text=evidence_text,
+        )
+        return build_response(
+            answer=json.dumps(verdict),
+            selected_agent=AGENT_NAME,
+            citations=[],
+            extra={"agentType": "relevance_check", "agentName": "Financial Statement Review Agent"},
+        )
 
     original_user_message = get_message_from_payload(payload)
     report_ids             = get_report_ids_from_payload(payload)
