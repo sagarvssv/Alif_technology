@@ -48,6 +48,200 @@ const SECTION_COLOURS = {
 // so the same verdict always produces the same outcome, every time.
 const RISK_LEVEL_ORDER = ["Low", "Low-Medium", "Medium", "Medium-High", "High"];
 
+// ── CLIENT MANDATORY CHECKLIST (static reference, Excel-sourced) ───────
+// This is the client's OWN official Statutory Audit Line Item Checklist
+// (their Excel document), used verbatim, deterministically — no AI
+// involved, no backend call needed. It is COMPLETELY SEPARATE from the
+// interactive "Planned Audit Response" checklist above (which is
+// AI-generated and specific to the numbers in the uploaded document,
+// with its own upload/checkbox tracking stored per-risk). This one is
+// purely a read-only reference reminder of the firm's mandatory
+// procedures for this line item — shown in the "Mandatory Checklist"
+// section, not tied to any satisfied/checked state at all.
+const CLIENT_CHECKLIST_TEMPLATES = [
+  { aliases: ["property, plant & equipment", "property plant equipment", "ppe", "fixed assets"], items: [
+    "Fixed asset schedule reconciles with GL; material additions/disposals are supported.",
+    "Existence and ownership of material assets have been considered.",
+    "Depreciation, useful lives and capitalisation are reasonable.",
+    "Impairment indicators, if any, have been considered.",
+    "Classification and disclosures are appropriate.",
+  ]},
+  { aliases: ["investments", "investment"], items: [
+    "Investment schedule reconciles with GL and ownership/existence is supported.",
+    "Nature and classification of investment and applicable accounting treatment are appropriate.",
+    "Carrying/fair value and impairment, where applicable, are supported.",
+    "Material additions, disposals, income and gains/losses have been verified.",
+    "Related-party involvement, restrictions and disclosures have been considered.",
+    "AI escalation: Unlisted/material investment, complex valuation, missing ownership evidence or impairment indicator → Senior Review.",
+  ]},
+  { aliases: ["inventory", "inventory valuation", "stock", "stock valuation"], items: [
+    "Inventory listing reconciles with GL and existence has been considered.",
+    "Material inventory/counts have been tested where applicable.",
+    "Costing and lower of cost/NRV have been considered.",
+    "Obsolete, damaged or slow-moving inventory has been considered.",
+    "Cut-off and disclosures are appropriate.",
+  ]},
+  { aliases: ["trade receivables", "accounts receivable", "receivables ageing"], items: [
+    "Ageing/listing reconciles with GL.",
+    "Material balances are supported by confirmation, subsequent receipts or other evidence.",
+    "Long-outstanding/disputed balances and ECL have been considered.",
+    "Cut-off and unusual balances have been reviewed.",
+    "Classification and disclosures are appropriate.",
+  ]},
+  { aliases: ["other receivables / advances / prepayments / deposits", "other receivables", "advances", "prepayments", "deposits"], items: [
+    "Detailed schedule reconciles with GL.",
+    "Material balances are supported and their nature understood.",
+    "Recoverability and/or appropriate period allocation has been considered.",
+    "Old, unusual or related-party balances have been investigated.",
+    "Classification and disclosures are appropriate.",
+  ]},
+  { aliases: ["cash & bank", "cash and bank", "cash and bank balances", "bank balances", "cash balances", "cash & bank balances"], items: [
+    "Bank/cash balances reconcile with GL.",
+    "Bank statements/confirmations or other appropriate evidence obtained.",
+    "Material/unusual reconciling items have been reviewed.",
+    "Restricted, pledged or unusual balances have been considered.",
+    "Classification and disclosures are appropriate.",
+  ]},
+  { aliases: ["share capital & equity", "share capital", "equity"], items: [
+    "Share capital agrees with legal/statutory records.",
+    "Opening equity agrees with prior-year audited financial statements.",
+    "Profit/loss, dividends and other movements reconcile.",
+    "Material shareholder/current-account movements are supported, where applicable.",
+    "Classification and disclosures are appropriate.",
+  ]},
+  { aliases: ["bank borrowings / loans", "bank borrowings", "borrowings", "loans payable", "bank loans"], items: [
+    "Balances reconcile with GL and are supported by agreements/confirmations.",
+    "Material additions, repayments and finance costs have been checked.",
+    "Current/non-current classification is appropriate.",
+    "Security, guarantees, covenants and significant terms have been considered.",
+    "Presentation and disclosures are appropriate.",
+  ]},
+  { aliases: ["employee end-of-service / employee benefit obligations", "employee end-of-service", "end of service", "eosb", "employee benefit obligations", "gratuity"], items: [
+    "Provision reconciles with supporting employee calculations.",
+    "Material calculation inputs have been checked.",
+    "Provision appears reasonable under applicable requirements.",
+    "Material movements/payments during the year have been considered.",
+    "Classification and disclosures are appropriate.",
+  ]},
+  { aliases: ["trade payables", "accounts payable", "supplier payables"], items: [
+    "Supplier listing reconciles with GL.",
+    "Material balances are supported by statements, subsequent payments or other evidence.",
+    "Completeness/unrecorded liabilities have been considered.",
+    "Old, debit or unusual balances have been investigated.",
+    "Classification and disclosures are appropriate.",
+  ]},
+  { aliases: ["accruals & other payables", "accruals", "accrued expenses", "accrued", "other payables"], items: [
+    "Detailed schedule reconciles with GL.",
+    "Material accruals/payables are supported and reasonable.",
+    "Subsequent invoices/payments have been considered where relevant.",
+    "Old, unusual or significant balances have been investigated.",
+    "Classification and disclosures are appropriate.",
+  ]},
+  { aliases: ["related-party balances", "related party balances", "related parties", "related party"], items: [
+    "Related parties and balances have been identified and reconciled.",
+    "Material transactions/movements are supported.",
+    "Nature, terms and recoverability/settlement have been considered.",
+    "Completeness of related parties/transactions has been considered.",
+    "Required related-party disclosures are appropriate.",
+  ]},
+  { aliases: ["vat / indirect tax balances", "vat", "indirect tax"], items: [
+    "GL balances reconcile with filed returns/tax records.",
+    "Material differences have been investigated.",
+    "Payments/refunds and closing balance are supported.",
+    "Potential non-compliance/exposure has been considered.",
+    "Classification and presentation are appropriate.",
+  ]},
+  { aliases: ["corporate tax / income tax", "corporate tax", "income tax"], items: [
+    "Accounting profit reconciles with tax computation.",
+    "Material tax adjustments and applicable tax rate have been reviewed.",
+    "Current tax provision/payment reconciles.",
+    "Deferred tax applicability has been considered.",
+    "Presentation and disclosures are appropriate.",
+  ]},
+  { aliases: ["provisions / contingencies / commitments", "provisions", "contingencies", "commitments"], items: [
+    "Material provisions, guarantees and commitments have been identified.",
+    "Supporting information and management/legal assessment have been considered.",
+    "Recognition versus disclosure treatment is appropriate.",
+    "Subsequent developments have been considered.",
+    "Disclosures are adequate.",
+  ]},
+  { aliases: ["revenue", "revenue cutoff", "revenue recognition", "sales"], items: [
+    "Revenue reconciles with GL/supporting records.",
+    "Material revenue streams and recognition basis are understood.",
+    "Material/sample transactions and year-end cut-off have been tested.",
+    "Analytical review performed and significant/unusual movements investigated.",
+    "Accounting, VAT/tax and disclosure implications have been considered.",
+  ]},
+  { aliases: ["cost of revenue / cost of sales", "cost of revenue", "cost of sales", "cogs"], items: [
+    "Cost categories reconcile with GL.",
+    "Gross margin compared with prior year/expectations.",
+    "Material/sample costs are supported.",
+    "Completeness and cut-off have been reviewed.",
+    "Classification and related-party implications have been considered.",
+  ]},
+  { aliases: ["salaries & employee costs", "salaries", "employee costs", "payroll"], items: [
+    "Payroll reconciles with GL.",
+    "Employee/payroll records and sample salaries/payments have been tested.",
+    "New joiners/leavers and bonuses/allowances have been checked.",
+    "Significant movements and key management costs have been investigated.",
+    "Accruals and classification are appropriate.",
+  ]},
+  { aliases: ["administrative & general expenses", "administrative expenses", "general expenses", "admin expenses"], items: [
+    "Material expense categories tested.",
+    "Analytical comparison with prior year performed.",
+    "Unusual/material transactions investigated.",
+    "Business purpose, cut-off and classification considered.",
+    "Related-party/VAT/tax implications considered where relevant.",
+  ]},
+  { aliases: ["management / director remuneration", "director remuneration", "management remuneration"], items: [
+    "Amount reconciled with GL.",
+    "Approval/agreement and payment supported.",
+    "Unusual benefits or personal expenditure considered.",
+    "Tax implications considered where relevant.",
+    "Related-party/key management disclosure considered.",
+  ]},
+  { aliases: ["depreciation / amortisation", "depreciation", "amortisation", "amortization"], items: [
+    "Expense reconciled with underlying asset schedule.",
+    "Calculation and rates/useful lives checked.",
+    "Additions/disposals appropriately reflected.",
+    "Classification appropriate.",
+  ]},
+  { aliases: ["finance cost", "interest expense", "finance costs"], items: [
+    "Amount reconciled with GL and borrowings.",
+    "Material interest expense checked against facility terms.",
+    "Significant/unusual charges investigated.",
+    "Classification/disclosure appropriate.",
+  ]},
+  { aliases: ["other income"], items: [
+    "Composition reconciled and understood.",
+    "Material items supported.",
+    "Unusual/non-recurring items investigated.",
+    "Recognition and classification appropriate.",
+    "Tax/VAT implications considered where relevant.",
+  ]},
+];
+
+function _normalizeAreaText(text) {
+  return (text || "").toLowerCase().replace(/[^a-z0-9 ]/g, " ").trim();
+}
+
+// Returns the client's fixed checklist items for this risk area, or
+// null if nothing in the official Excel checklist matches it (the
+// Mandatory Checklist section simply doesn't render in that case).
+function getClientChecklistTemplate(riskArea) {
+  const normalized = _normalizeAreaText(riskArea);
+  if (!normalized) return null;
+  for (const template of CLIENT_CHECKLIST_TEMPLATES) {
+    for (const alias of template.aliases) {
+      const aliasNorm = _normalizeAreaText(alias);
+      if (aliasNorm && (normalized.includes(aliasNorm) || aliasNorm.includes(normalized))) {
+        return template.items;
+      }
+    }
+  }
+  return null;
+}
+
 const RISK_LEVELS = {
   "high":            { pct: 90, bg: "#fee2e2", text: "#991b1b", bar: "#ef4444", needsGap: true  },
   "high (presumed)": { pct: 90, bg: "#fee2e2", text: "#991b1b", bar: "#ef4444", needsGap: true  },
@@ -394,10 +588,16 @@ function applyRiskVerdictToReport(oldMarkdown, targetArea, verdict, currentLevel
 // updates never compound on top of each other. The note names exactly
 // which items are still pending, satisfying the "show all risks, then
 // show which are still pending" requirement.
-function summarizeChecklistProgress(items) {
-  const total = items.length;
-  const doneItems = items.filter((i) => i.satisfied || i.manuallyChecked);
-  const pendingItems = items.filter((i) => !(i.satisfied || i.manuallyChecked));
+// UPDATED: now combines BOTH checklists — the AI-generated "Planned
+// Audit Response" items AND the client's "Mandatory Checklist" items —
+// into ONE overall progress count, since together they represent the
+// total evidence gathered for this risk. Satisfying an item in EITHER
+// checklist counts toward the same risk-level reduction.
+function summarizeChecklistProgress(items, mandatoryItems = []) {
+  const allItems = [...(items || []), ...(mandatoryItems || [])];
+  const total = allItems.length;
+  const doneItems = allItems.filter((i) => i.satisfied || i.manuallyChecked);
+  const pendingItems = allItems.filter((i) => !(i.satisfied || i.manuallyChecked));
   const doneCount = doneItems.length;
 
   let note;
@@ -455,13 +655,13 @@ function buildDescriptionStatusUpdate(doneCount, total) {
   return `${doneCount} of ${total} checklist items confirmed so far — largely addressed, with the remaining item(s) still outstanding.`;
 }
 
-function applyChecklistProgressToReport(oldMarkdown, targetArea, baseLevel, items) {
+function applyChecklistProgressToReport(oldMarkdown, targetArea, baseLevel, items, mandatoryItems = []) {
   if (!oldMarkdown) return oldMarkdown;
   const lines = oldMarkdown.split("\n");
   const rowIndex = findTableRowLineIndex(lines, targetArea);
   if (rowIndex === -1) return oldMarkdown;
 
-  const { total, doneCount, note } = summarizeChecklistProgress(items);
+  const { total, doneCount, note } = summarizeChecklistProgress(items, mandatoryItems);
   if (total === 0) return oldMarkdown;
 
   const steps = computeStepsFromChecklistProgress(baseLevel, doneCount, total);
@@ -474,6 +674,7 @@ function applyChecklistProgressToReport(oldMarkdown, targetArea, baseLevel, item
 // ─── Item Modal with Solutions ────────────────────────────────────────
 function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onRiskEvidenceRegenerated }) {
   const [showSolutions, setShowSolutions] = useState(false);
+  const [showMandatoryChecklist, setShowMandatoryChecklist] = useState(false);
   if (!item) return null;
   const cfg       = getRisk(item.riskRaw);
   const solutions = getRiskSolutions(item.area);
@@ -501,9 +702,19 @@ function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onR
   const [justificationOpenId, setJustificationOpenId] = useState(null);
   const [justificationDraft, setJustificationDraft]   = useState("");
 
+  // ── MANDATORY CHECKLIST: local state (fully independent from the
+  // dynamic checklist above — separate storage field, separate state,
+  // separate handlers, never interacts with checklistItems). ─────────
+  const mandatoryChecklistRequestedRef = useRef(false);
+  const [mandatoryItemUploadState, setMandatoryItemUploadState] = useState({});
+  const [mandatoryItemFileResults, setMandatoryItemFileResults] = useState({});
+  const [mandatoryJustificationOpenId, setMandatoryJustificationOpenId] = useState(null);
+  const [mandatoryJustificationDraft, setMandatoryJustificationDraft]   = useState("");
+
   useEffect(() => {
     let cancelled = false;
     checklistRequestedRef.current = false;
+    mandatoryChecklistRequestedRef.current = false;
     setReviewLoading(true);
     setReviewError("");
     setChecklistError("");
@@ -511,6 +722,10 @@ function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onR
     setItemFileResults({});
     setJustificationOpenId(null);
     setJustificationDraft("");
+    setMandatoryItemUploadState({});
+    setMandatoryItemFileResults({});
+    setMandatoryJustificationOpenId(null);
+    setMandatoryJustificationDraft("");
     fetch(RISK_API(riskKey))
       .then((res) => res.json())
       .then((data) => {
@@ -522,6 +737,21 @@ function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onR
         // straight past this.
         if (item.needsGap && (!data.checklistItems || data.checklistItems.length === 0)) {
           generateChecklist();
+        }
+        // MANDATORY CHECKLIST: initialize once from the static client
+        // Excel template (no AI call — the text is already known
+        // client-side), only if this risk area has a matching line item
+        // and nothing has been saved for it yet.
+        if (
+          item.needsGap &&
+          (!data.mandatoryChecklistItems || data.mandatoryChecklistItems.length === 0) &&
+          !mandatoryChecklistRequestedRef.current
+        ) {
+          const templateItems = getClientChecklistTemplate(item.area);
+          if (templateItems && templateItems.length > 0) {
+            mandatoryChecklistRequestedRef.current = true;
+            saveRiskUpdate({ setMandatoryChecklist: templateItems });
+          }
         }
       })
       .catch(() => { if (!cancelled) setReviewError("Could not load review status for this risk."); })
@@ -844,7 +1074,8 @@ function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onR
         currentReportContent,
         item.area,
         baseLevel,
-        result.checklistItems || []
+        result.checklistItems || [],
+        result.mandatoryChecklistItems || []
       );
       onRiskEvidenceRegenerated?.(mergedContent);
     }
@@ -911,7 +1142,8 @@ function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onR
         currentReportContent,
         item.area,
         baseLevel,
-        result.checklistItems || []
+        result.checklistItems || [],
+        result.mandatoryChecklistItems || []
       );
       onRiskEvidenceRegenerated?.(mergedContent);
     }
@@ -1070,7 +1302,8 @@ function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onR
             currentReportContent,
             item.area,
             baseLevel,
-            result.checklistItems || []
+            result.checklistItems || [],
+            result.mandatoryChecklistItems || []
           );
           onRiskEvidenceRegenerated?.(mergedContent);
         }
@@ -1092,6 +1325,252 @@ function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onR
       await saveRiskUpdate({ removeAttachment: { s3Key: fileResult.s3Key } });
     }
     setItemFileResults((prev) => ({
+      ...prev,
+      [checklistItemId]: (prev[checklistItemId] || []).filter((r) => r.s3Key !== fileResult.s3Key),
+    }));
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // MANDATORY CHECKLIST — same interaction pattern as the dynamic
+  // checklist above (checkbox/lock, per-item upload, per-file results,
+  // Cancel, manual justification), but targeting mandatoryChecklistItems
+  // instead. Deliberately does NOT call applyChecklistProgressToReport
+  // UPDATED: Mandatory Checklist items now DO contribute to the risk
+  // level — combined with the dynamic checklist's progress via
+  // applyChecklistProgressToReport's mandatoryItems parameter — since
+  // satisfying either checklist represents real evidence gathered for
+  // this risk. Uses checklistBaseLevel (the risk's ORIGINAL level,
+  // captured once) so combining two checklists never compounds
+  // incorrectly, exactly like the dynamic checklist's own math.
+  // ═══════════════════════════════════════════════════════════════════
+
+  async function saveMandatoryChecklistItemUpdate(itemId, patch) {
+    const result = await saveRiskUpdate({ updateMandatoryChecklistItem: { id: itemId, ...patch } });
+    if (result) {
+      const baseLevel = result.checklistBaseLevel || item.riskRaw;
+      const mergedContent = applyChecklistProgressToReport(
+        currentReportContent,
+        item.area,
+        baseLevel,
+        result.checklistItems || [],
+        result.mandatoryChecklistItems || []
+      );
+      onRiskEvidenceRegenerated?.(mergedContent);
+    }
+    return result;
+  }
+
+  function handleMandatoryItemCheckboxClick(checklistItem) {
+    if (checklistItem.satisfied) return;
+    const isDone = checklistItem.satisfied || checklistItem.manuallyChecked;
+    if (isDone) {
+      saveMandatoryChecklistItemUpdate(checklistItem.id, {
+        manuallyChecked: false,
+        satisfied: false,
+        justification: "",
+      });
+      return;
+    }
+    setMandatoryJustificationOpenId(checklistItem.id);
+    setMandatoryJustificationDraft("");
+  }
+
+  async function handleSaveMandatoryJustification(checklistItem) {
+    const text = mandatoryJustificationDraft.trim();
+    if (!text) return;
+    await saveMandatoryChecklistItemUpdate(checklistItem.id, {
+      manuallyChecked: true,
+      satisfied: true,
+      justification: text,
+    });
+    setMandatoryJustificationOpenId(null);
+    setMandatoryJustificationDraft("");
+  }
+
+  async function handleCancelMandatoryChecklistItem(checklistItem) {
+    const patch = {
+      updateMandatoryChecklistItem: {
+        id: checklistItem.id,
+        satisfied: false,
+        satisfiedBy: null,
+        manuallyChecked: false,
+        justification: "",
+      },
+    };
+    if (checklistItem.satisfiedBy) {
+      patch.removeAttachment = { s3Key: checklistItem.satisfiedBy };
+    }
+    const result = await saveRiskUpdate(patch);
+    setMandatoryItemFileResults((prev) => ({ ...prev, [checklistItem.id]: [] }));
+    if (result) {
+      const baseLevel = result.checklistBaseLevel || item.riskRaw;
+      const mergedContent = applyChecklistProgressToReport(
+        currentReportContent,
+        item.area,
+        baseLevel,
+        result.checklistItems || [],
+        result.mandatoryChecklistItems || []
+      );
+      onRiskEvidenceRegenerated?.(mergedContent);
+    }
+  }
+
+  async function checkMandatoryChecklistItemRelevance(checklistItem, evidenceReportId) {
+    const placeholderMessage = `Check evidence relevance for one mandatory checklist item under "${item.area}".`;
+    const chatRes = await fetch(CHAT_API, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: placeholderMessage,
+        question: placeholderMessage,
+        sessionId: `risk-mandatory-relevance-${Date.now()}`,
+        reportId: evidenceReportId,
+        reportIds: [evidenceReportId],
+        selectedAgent: agentId,
+        agent: agentId,
+        generalMode: false,
+        general_mode: false,
+        relevanceCheck: {
+          riskArea: item.area,
+          riskDescription: item.description,
+          plannedResponse: checklistItem.text,
+        },
+      }),
+    });
+    const chatData = await chatRes.json();
+    if (!chatRes.ok && chatRes.status !== 202) {
+      throw new Error(chatData.message || chatData.error || `Relevance check failed (${chatRes.status}).`);
+    }
+    let final = chatData;
+    if (chatData.status === "processing" && chatData.jobId) {
+      final = await pollAgentJob(chatData.jobId, () =>
+        setMandatoryItemUploadState((prev) => ({
+          ...prev,
+          [checklistItem.id]: { uploading: true, stage: "Checking this item against the document…" },
+        }))
+      );
+    }
+    const rawAnswer = final.answer || final.response || final.message || "";
+    try {
+      return JSON.parse(rawAnswer);
+    } catch {
+      return {
+        relevant: false,
+        resolves_risk: false,
+        reason: "Could not read the assessment result.",
+        specifically_addressed: "",
+        still_outstanding: "",
+      };
+    }
+  }
+
+  async function handleMandatoryItemFileSelect(checklistItem, e) {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0 || !reportId) return;
+    setMandatoryItemUploadState((prev) => ({ ...prev, [checklistItem.id]: { uploading: true, stage: "" } }));
+    setMandatoryItemFileResults((prev) => ({ ...prev, [checklistItem.id]: [] }));
+    try {
+      let existingIds = new Set();
+      try {
+        const snapRes  = await fetch(`${RISK_DOCUMENTS_API}?portal=user`);
+        const snapData = await snapRes.json();
+        const snapList = snapData.reports || snapData.documents || snapData.items || [];
+        existingIds = new Set(
+          snapList.map((d) => d.reportId || d.documentId || d.document_id).filter(Boolean)
+        );
+      } catch {}
+
+      let satisfiedNow   = !!checklistItem.satisfied;
+      let satisfiedByNow = checklistItem.satisfiedBy || null;
+
+      for (const file of files) {
+        setMandatoryItemUploadState((prev) => ({
+          ...prev,
+          [checklistItem.id]: { uploading: true, stage: `Uploading ${file.name}…` },
+        }));
+        const urlRes = await fetch(RISK_ATTACHMENT_URL_API, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ file_name: file.name, content_type: file.type || "application/pdf" }),
+        });
+        const urlData   = await urlRes.json();
+        const uploadUrl = urlData.uploadUrl || urlData.upload_url || urlData.url || urlData.presignedUrl;
+        if (!uploadUrl) throw new Error(`Could not get an upload link for ${file.name}.`);
+
+        const putRes = await fetch(uploadUrl, {
+          method: "PUT",
+          headers: { "Content-Type": file.type || "application/pdf" },
+          body: file,
+        });
+        if (!putRes.ok) throw new Error(`Uploading ${file.name} to storage failed.`);
+
+        setMandatoryItemUploadState((prev) => ({
+          ...prev,
+          [checklistItem.id]: { uploading: true, stage: `Extracting text from ${file.name}…` },
+        }));
+        const evidenceReportId = await waitForRiskEvidenceDocument(file.name, existingIds);
+        existingIds.add(evidenceReportId);
+
+        setMandatoryItemUploadState((prev) => ({
+          ...prev,
+          [checklistItem.id]: { uploading: true, stage: `Checking ${file.name} against this item…` },
+        }));
+        const verdict = await checkMandatoryChecklistItemRelevance(checklistItem, evidenceReportId);
+
+        setMandatoryItemFileResults((prev) => ({
+          ...prev,
+          [checklistItem.id]: [
+            ...(prev[checklistItem.id] || []),
+            {
+              fileName: file.name,
+              s3Key: evidenceReportId,
+              relevant: verdict.relevant,
+              resolves_risk: verdict.resolves_risk,
+              reason: verdict.reason,
+              stillOutstanding: verdict.still_outstanding || "",
+            },
+          ],
+        }));
+
+        const fileSatisfies = !!(verdict.relevant && verdict.resolves_risk);
+        if (fileSatisfies && !satisfiedNow) {
+          satisfiedNow   = true;
+          satisfiedByNow = evidenceReportId;
+        }
+
+        const patchItem = { id: checklistItem.id, satisfied: satisfiedNow };
+        if (satisfiedNow) patchItem.satisfiedBy = satisfiedByNow;
+        if (fileSatisfies) patchItem.justification = verdict.reason || "";
+
+        const result = await saveRiskUpdate({
+          newAttachment: { fileName: file.name, s3Key: evidenceReportId },
+          updateMandatoryChecklistItem: patchItem,
+        });
+        if (result) {
+          const baseLevel = result.checklistBaseLevel || item.riskRaw;
+          const mergedContent = applyChecklistProgressToReport(
+            currentReportContent,
+            item.area,
+            baseLevel,
+            result.checklistItems || [],
+            result.mandatoryChecklistItems || []
+          );
+          onRiskEvidenceRegenerated?.(mergedContent);
+        }
+      }
+    } catch (err) {
+      setReviewError(err.message || "Failed to attach the document for this item. Please try again.");
+    } finally {
+      setMandatoryItemUploadState((prev) => ({ ...prev, [checklistItem.id]: { uploading: false, stage: "" } }));
+      e.target.value = "";
+    }
+  }
+
+  async function handleCancelMandatoryFileResult(checklistItemId, fileResult) {
+    if (fileResult.s3Key) {
+      await saveRiskUpdate({ removeAttachment: { s3Key: fileResult.s3Key } });
+    }
+    setMandatoryItemFileResults((prev) => ({
       ...prev,
       [checklistItemId]: (prev[checklistItemId] || []).filter((r) => r.s3Key !== fileResult.s3Key),
     }));
@@ -1151,12 +1630,11 @@ function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onR
           </div>
 
           {/* ══════════════════════════════════════════════════════════
-              CHECKLIST FEATURE: sits right after Risk Description, so
-              every sub-item making up this risk is visible immediately
-              — not tucked away further down near "How to Overcome This
-              Risk". Falls back to the plain Planned Response text if
-              the checklist couldn't be generated, so the modal never
-              breaks.
+              CHECKLIST FEATURE: sits right after Risk Description, so every
+              sub-item making up this risk (with its own upload button) is
+              visible immediately. Falls back to the plain Planned
+              Response text if the checklist couldn't be generated, so
+              the modal never breaks.
               ══════════════════════════════════════════════════════════ */}
           {item.needsGap && (
             <div className="single-section attention-section">
@@ -1512,26 +1990,230 @@ function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onR
             </div>
           )}
 
-          {/* NOTE: the old whole-risk upload control that lived here has
-              been removed — each checklist item above now has its own
-              scoped upload button, so a second, redundant upload control
-              for the whole risk is no longer needed. This section is now
-              a read-only record of what's been attached, for audit
-              trail purposes only. */}
-          {review?.attachments?.length > 0 && (
+          {/* NOTE: the redundant "Attached Document(s)" history list that
+              used to live here has been removed — each checklist item
+              (in both Planned Audit Response and Mandatory Checklist)
+              already shows its own per-file result directly under it,
+              so a separate global attachment list was just duplicating
+              that information. reviewError is kept visible here since
+              this was the only place it was shown. */}
+          {reviewError && (
             <div className="single-section risk-item-review-section">
-              <div className="single-section-label">📎 Attached Document(s)</div>
-              {reviewError && <div className="risk-review-error">⚠️ {reviewError}</div>}
-              <ul className="risk-review-attachment-list">
-                {review.attachments.map((a, i) => (
-                  <li key={i} className="risk-review-attachment-item">
-                    📎 {a.fileName}
-                    <span className="risk-review-attachment-meta">
-                      — {new Date(a.uploadedAt).toLocaleDateString()}
-                    </span>
-                  </li>
-                ))}
-              </ul>
+              <div className="risk-review-error">⚠️ {reviewError}</div>
+            </div>
+          )}
+
+          {/* ══════════════════════════════════════════════════════════
+              "Mandatory Checklist" — the CLIENT'S OWN official Excel
+              checklist for this line item, shown as a collapsible,
+              read-only reference. Completely independent from the
+              interactive "Planned Audit Response" checklist above: no
+              shared storage, no satisfied/checked state, no AI
+              involvement — just the firm's mandatory procedures for
+              this specific line item, looked up client-side by risk
+              area name. Renders nothing if no line item matches, or
+              while the items are still being saved on first open.
+              ══════════════════════════════════════════════════════════ */}
+          {item.needsGap && review?.mandatoryChecklistItems?.length > 0 && (
+            <div className="single-section risk-item-review-section">
+              <button
+                type="button"
+                onClick={() => setShowMandatoryChecklist((v) => !v)}
+                style={{
+                  display: "flex", alignItems: "center", justifyContent: "space-between",
+                  width: "100%", background: "transparent", border: "none", cursor: "pointer",
+                  padding: 0,
+                }}
+              >
+                <span className="single-section-label" style={{ margin: 0 }}>📋 Mandatory Checklist</span>
+                <span style={{ fontSize: 13, color: "#64748b", fontWeight: 600 }}>
+                  {showMandatoryChecklist ? "▲ Hide" : "▾ Show"}
+                </span>
+              </button>
+              {showMandatoryChecklist && (
+                <div style={{ marginTop: 10 }}>
+                  {review.mandatoryChecklistItems.map((ci) => {
+                    const isDone = ci.satisfied || ci.manuallyChecked;
+                    const isLocked = ci.satisfied;
+                    const uploadState = mandatoryItemUploadState[ci.id] || {};
+                    return (
+                      <div key={ci.id}
+                        style={{
+                          display: "flex", flexDirection: "column", gap: 8,
+                          padding: "13px 15px",
+                          marginBottom: 9,
+                          borderRadius: 10,
+                          border: isDone ? "1px solid #86efac" : "1px solid #e2e8f0",
+                          background: isDone ? "#f0fdf4" : "#f8fafc",
+                          boxShadow: "0 1px 2px rgba(0,0,0,0.04)",
+                        }}>
+                        <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+                          {isDone ? (
+                            <span
+                              title={isLocked ? "Automatically satisfied by uploaded evidence" : "Manually confirmed"}
+                              style={{
+                                display: "inline-flex", alignItems: "center", justifyContent: "center",
+                                width: 22, height: 22, borderRadius: "50%", flexShrink: 0, marginTop: 1,
+                                background: isLocked ? "#16a34a" : "#d97706",
+                                color: "#fff", fontSize: 13, fontWeight: 700,
+                                boxShadow: "0 1px 3px rgba(0,0,0,0.18)",
+                              }}
+                            >
+                              ✓
+                            </span>
+                          ) : (
+                            <input
+                              type="checkbox"
+                              checked={false}
+                              disabled={uploadState.uploading || saving}
+                              onChange={() => handleMandatoryItemCheckboxClick(ci)}
+                              style={{ marginTop: 3, width: 17, height: 17, flexShrink: 0, cursor: "pointer", accentColor: "#f59e0b" }}
+                            />
+                          )}
+                          <div style={{ flex: 1 }}>
+                            <div style={{
+                              fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif",
+                              fontSize: 14, fontWeight: 500, lineHeight: 1.5,
+                              color: isDone ? "#14532d" : "#1f2937",
+                            }}>
+                              {ci.text}
+                            </div>
+
+                            {(ci.satisfied || (ci.manuallyChecked && !ci.satisfied)) && (
+                              <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6, flexWrap: "wrap" }}>
+                                {ci.satisfied && (
+                                  <div style={{
+                                    display: "inline-flex", alignItems: "center", gap: 4,
+                                    padding: "2px 9px", borderRadius: 999,
+                                    background: "#dcfce7", color: "#166534",
+                                    fontSize: 11.5, fontWeight: 600, letterSpacing: 0.2,
+                                  }}>
+                                    ✅ Satisfied by uploaded evidence
+                                  </div>
+                                )}
+                                {ci.manuallyChecked && !ci.satisfied && (
+                                  <div style={{
+                                    display: "inline-flex", alignItems: "center", gap: 4,
+                                    padding: "2px 9px", borderRadius: 999,
+                                    background: "#fef3c7", color: "#92400e",
+                                    fontSize: 11.5, fontWeight: 600, letterSpacing: 0.2,
+                                  }}>
+                                    ✍️ Manually confirmed
+                                  </div>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => handleCancelMandatoryChecklistItem(ci)}
+                                  disabled={saving}
+                                  title="Uploaded the wrong document? Undo this item."
+                                  style={{
+                                    fontSize: 11.5, fontWeight: 600, color: "#b91c1c",
+                                    background: "transparent", border: "1px solid #fca5a5",
+                                    borderRadius: 999, padding: "2px 9px", cursor: "pointer",
+                                  }}
+                                >
+                                  ✕ Cancel
+                                </button>
+                              </div>
+                            )}
+                            {ci.manuallyChecked && !ci.satisfied && ci.justification && (
+                              <div style={{ marginTop: 5, fontSize: 12.5, color: "#78350f", fontStyle: "italic" }}>
+                                “{ci.justification}”
+                              </div>
+                            )}
+
+                            {!isDone && (
+                              <label className="risk-review-upload-btn"
+                                style={{ marginTop: 8, display: "inline-block", fontSize: 12, padding: "4px 10px" }}>
+                                <input
+                                  type="file"
+                                  multiple
+                                  onChange={(e) => handleMandatoryItemFileSelect(ci, e)}
+                                  disabled={uploadState.uploading}
+                                  style={{ display: "none" }}
+                                />
+                                {uploadState.uploading ? (uploadState.stage || "Processing…") : "📎 Upload for this item"}
+                              </label>
+                            )}
+
+                            {(mandatoryItemFileResults[ci.id] || []).length > 0 && (
+                              <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+                                {mandatoryItemFileResults[ci.id].map((fr) => {
+                                  const isMatch    = fr.relevant && fr.resolves_risk;
+                                  const isPartial  = fr.relevant && !fr.resolves_risk;
+                                  const notRelated = !fr.relevant;
+                                  const boxStyle = isMatch
+                                    ? { background: "#f0fdf4", border: "1px solid #86efac" }
+                                    : isPartial
+                                      ? { background: "#fffbeb", border: "1px solid #fcd34d" }
+                                      : { background: "#fef2f2", border: "1px solid #fca5a5" };
+                                  return (
+                                    <div key={fr.s3Key} style={{ ...boxStyle, borderRadius: 8, padding: "8px 10px" }}>
+                                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+                                        <div style={{ fontSize: 12.5, fontWeight: 700, color: "#1e293b", display: "flex", alignItems: "center", gap: 6 }}>
+                                          <span>{isMatch ? "✅" : isPartial ? "🟡" : "⚠️"}</span>
+                                          <span>{fr.fileName}</span>
+                                        </div>
+                                        {notRelated && (
+                                          <button
+                                            type="button"
+                                            onClick={() => handleCancelMandatoryFileResult(ci.id, fr)}
+                                            disabled={saving}
+                                            title="Remove this unrelated document"
+                                            style={{
+                                              fontSize: 11, fontWeight: 600, color: "#b91c1c",
+                                              background: "transparent", border: "1px solid #fca5a5",
+                                              borderRadius: 999, padding: "1px 8px", cursor: "pointer",
+                                            }}
+                                          >
+                                            ✕ Cancel
+                                          </button>
+                                        )}
+                                      </div>
+                                      <div style={{ fontSize: 12, color: "#475569", marginTop: 3 }}>
+                                        {isMatch && "Related — this document satisfies this item."}
+                                        {isPartial && `Related, but not conclusive yet — ${fr.stillOutstanding || fr.reason}`}
+                                        {notRelated && "Not related to this specific item."}
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        {mandatoryJustificationOpenId === ci.id && (
+                          <div style={{ marginLeft: 34, display: "flex", flexDirection: "column", gap: 6 }}>
+                            <textarea
+                              className="risk-review-textarea"
+                              placeholder="Explain why this item is being marked done without uploaded evidence…"
+                              value={mandatoryJustificationDraft}
+                              onChange={(e) => setMandatoryJustificationDraft(e.target.value)}
+                              rows={2}
+                            />
+                            <div style={{ display: "flex", gap: 8 }}>
+                              <button
+                                className="risk-review-comment-btn"
+                                onClick={() => handleSaveMandatoryJustification(ci)}
+                                disabled={!mandatoryJustificationDraft.trim() || saving}
+                              >
+                                {saving ? "Saving…" : "Confirm"}
+                              </button>
+                              <button
+                                className="risk-review-attachment-remove"
+                                onClick={() => { setMandatoryJustificationOpenId(null); setMandatoryJustificationDraft(""); }}
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
 
@@ -1806,6 +2488,13 @@ function Chatbot({
   agentId = "audit_planning_agent",
   agentLabel = "Audit Planning Agent",
   generateMessage = "Generate audit planning.",
+  // Set (from the sidebar's Gap Analysis dropdown in App.jsx) when the
+  // user clicked a SPECIFIC risk area rather than just the agent itself.
+  // Once this report's riskData is available, the effect below opens
+  // that risk's detail modal directly and calls onRiskAreaOpened() to
+  // clear the pending request in the parent.
+  openRiskArea = null,
+  onRiskAreaOpened,
 }) {
   const inputRef       = useRef(null);
   const messagesEndRef = useRef(null);
@@ -1819,6 +2508,23 @@ function Chatbot({
   const [loading,      setLoading]      = useState(false);
   const [loadingLabel, setLoadingLabel] = useState("");
   const [modalItem,    setModalItem]    = useState(null);
+
+  // Jump straight to a specific risk's modal when navigated here from
+  // the sidebar's Gap Analysis dropdown, instead of leaving the user to
+  // scroll through the report and find it themselves.
+  useEffect(() => {
+    if (!openRiskArea) return;
+    const reportMsg = [...messages].reverse().find((m) => m.isAuditReport && m.riskData);
+    if (!reportMsg) return;
+    const allItems = [...reportMsg.riskData.needsAttention, ...reportMsg.riskData.improved];
+    const target = allItems.find(
+      (it) => it.area.toLowerCase().trim() === openRiskArea.toLowerCase().trim()
+    );
+    if (target) {
+      setModalItem(target);
+      onRiskAreaOpened?.();
+    }
+  }, [openRiskArea, messages]);
 
   function getWelcomeMessage() {
     if (generalMode) return "Hi 👋 Ask me anything about UAE Corporate Tax, VAT, IFRS, audit standards, or general financial compliance. I will answer from the Knowledge Base only.";

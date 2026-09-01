@@ -61,6 +61,7 @@ def empty_review(risk_key):
         "attachments": [],
         "checklistItems": [],
         "checklistBaseLevel": None,
+        "mandatoryChecklistItems": [],
         "statusHistory": [
             {"status": "open", "changedBy": "system", "changedAt": now_iso()}
         ],
@@ -85,6 +86,7 @@ def get_review(risk_key):
         "attachments": item.get("attachments", []),
         "checklistItems": item.get("checklist_items", []),
         "checklistBaseLevel": item.get("checklist_base_level"),
+        "mandatoryChecklistItems": item.get("mandatory_checklist_items", []),
         "statusHistory": item.get("status_history", []),
         "createdAt": item.get("created_at"),
         "lastUpdated": item.get("last_updated"),
@@ -113,10 +115,17 @@ def handle_put(risk_key, body):
         a checklist already exists, so re-opening the modal never wipes
         progress already made. Each item is stored with a stable id and
         starts unsatisfied/unchecked.
-      updateChecklistItem: { id, satisfied?, satisfiedBy?,
+    updateChecklistItem: { id, satisfied?, satisfiedBy?,
         manuallyChecked?, justification? } — patches ONE existing
         checklist item by id. Only the fields provided are changed.
-      changedBy: string (who made this update, for status history)
+    setMandatoryChecklist: [ "item text 1", ... ] — same pattern as
+        setChecklist, but for the CLIENT'S static Excel checklist
+        (completely independent storage/list from checklistItems above
+        — the two never interact).
+    updateMandatoryChecklistItem: { id, satisfied?, satisfiedBy?,
+        manuallyChecked?, justification? } — same pattern as
+        updateChecklistItem, but patches mandatoryChecklistItems instead.
+    changedBy: string (who made this update, for status history)
     Each field is applied additively — a PUT only touches the fields it
     includes, so the frontend can update status and add a comment in the
     same call, or just one of them, without clobbering the other.
@@ -203,6 +212,41 @@ def handle_put(risk_key, body):
                 checklist_item["justification"] = str(update_checklist_item["justification"])
             break
 
+    # Mandatory Checklist (client's static Excel checklist) — mirrors the
+    # setChecklist/updateChecklistItem pattern above exactly, but reads
+    # and writes mandatoryChecklistItems, a COMPLETELY SEPARATE list.
+    # The two checklists never share ids, state, or storage.
+    set_mandatory_checklist = body.get("setMandatoryChecklist")
+    if set_mandatory_checklist and isinstance(set_mandatory_checklist, list) and not existing.get("mandatoryChecklistItems"):
+        existing["mandatoryChecklistItems"] = [
+            {
+                "id": uuid.uuid4().hex,
+                "text": str(text).strip(),
+                "satisfied": False,
+                "satisfiedBy": None,
+                "manuallyChecked": False,
+                "justification": "",
+            }
+            for text in set_mandatory_checklist
+            if str(text).strip()
+        ]
+
+    update_mandatory_checklist_item = body.get("updateMandatoryChecklistItem")
+    if update_mandatory_checklist_item and isinstance(update_mandatory_checklist_item, dict) and update_mandatory_checklist_item.get("id"):
+        target_id = update_mandatory_checklist_item["id"]
+        for checklist_item in existing.get("mandatoryChecklistItems", []):
+            if checklist_item.get("id") != target_id:
+                continue
+            if "satisfied" in update_mandatory_checklist_item:
+                checklist_item["satisfied"] = bool(update_mandatory_checklist_item["satisfied"])
+            if "satisfiedBy" in update_mandatory_checklist_item:
+                checklist_item["satisfiedBy"] = update_mandatory_checklist_item["satisfiedBy"]
+            if "manuallyChecked" in update_mandatory_checklist_item:
+                checklist_item["manuallyChecked"] = bool(update_mandatory_checklist_item["manuallyChecked"])
+            if "justification" in update_mandatory_checklist_item:
+                checklist_item["justification"] = str(update_mandatory_checklist_item["justification"])
+            break
+
     existing["lastUpdated"] = now_iso()
     if not existing.get("createdAt"):
         existing["createdAt"] = existing["lastUpdated"]
@@ -216,6 +260,7 @@ def handle_put(risk_key, body):
             "attachments": existing["attachments"],
             "checklist_items": existing.get("checklistItems", []),
             "checklist_base_level": existing.get("checklistBaseLevel"),
+            "mandatory_checklist_items": existing.get("mandatoryChecklistItems", []),
             "status_history": existing["statusHistory"],
             "created_at": existing["createdAt"],
             "last_updated": existing["lastUpdated"],

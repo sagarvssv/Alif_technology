@@ -579,6 +579,17 @@ function riskLevelPillStyle(levelRaw = "") {
   return { bg: "#f1f5f9", color: "#475569" };
 }
 
+// Matches Chatbot.jsx's RISK_LEVELS.needsGap classification: High,
+// Medium-High and Medium need attention; Low-Medium and Low are
+// improved/low-risk. Used to split the sidebar Gap Analysis dropdown
+// into the same two categories the report's own Gap Analysis panel uses.
+function isNeedsAttentionLevel(levelRaw = "") {
+  const key = levelRaw.toLowerCase();
+  if (key.includes("low-medium")) return false;
+  if (key.includes("low")) return false;
+  return true; // high, medium-high, medium
+}
+
 function buildRiskKeyForHistory(reportId, agentId, area) {
   const safeArea = (area || "").trim().toLowerCase().replace(/\s+/g, "-");
   return `${reportId || "no-report"}::${agentId || "no-agent"}::${safeArea}`;
@@ -744,6 +755,78 @@ function RiskAreaHistoryRow({ reportId, agentId, area, levelRaw, progress }) {
 // progress — pulled straight from the already-generated report content,
 // whether it's currently loaded in memory or only in the persisted
 // per-project cache.
+// ── Sidebar Gap Analysis dropdown (ADD-ON) ──────────────────────────────
+// Nested under an agent's sidebar row (Audit Planning Agent, or any
+// other agent that produces a Risk Assessment table). Splits that
+// document's risk areas into the same two categories the report's own
+// Gap Analysis panel uses — Needs Attention / Improvements — each
+// independently expandable to a flat list of the specific risk area
+// names. Clicking one opens that agent's view AND jumps straight to
+// that risk's detail modal via onOpenRiskArea, instead of just opening
+// the agent and leaving the user to scroll and find it themselves.
+function SidebarGapDropdown({ docId, agent, docState, onOpenRiskArea }) {
+  const [openCategory, setOpenCategory] = useState(null); // "attention" | "improved" | null
+
+  const state   = docState?.[agent.id] || {};
+  const raw     = state.preGenerated?.answer || state.preGenerated?.response || state.preGenerated?.message || state.content || "";
+  const content = removeSourcesFromAnswer(raw);
+  const rows    = content ? extractRiskAreaSummaries(content) : [];
+  const attentionRows = rows.filter((r) => isNeedsAttentionLevel(r.level));
+  const improvedRows  = rows.filter((r) => !isNeedsAttentionLevel(r.level));
+
+  if (rows.length === 0) return null;
+
+  return (
+    <div style={{ marginLeft: 30, marginTop: 2, marginBottom: 4 }}>
+      {[
+        { key: "attention", label: `⚠️ Needs Attention (${attentionRows.length})`, rows: attentionRows, color: "#f87171" },
+        { key: "improved",  label: `✅ Improvements (${improvedRows.length})`,      rows: improvedRows,  color: "#4ade80" },
+      ].map((cat) => (
+        <div key={cat.key} style={{ marginBottom: 2 }}>
+          <button
+            type="button"
+            onClick={() => setOpenCategory((c) => (c === cat.key ? null : cat.key))}
+            disabled={cat.rows.length === 0}
+            style={{
+              display: "flex", alignItems: "center", gap: 6, width: "100%",
+              background: "transparent", border: "none", cursor: cat.rows.length ? "pointer" : "default",
+              color: cat.rows.length ? "#cbd5e1" : "#475569", fontSize: 11.5, fontWeight: 600,
+              padding: "3px 0", textAlign: "left",
+            }}
+          >
+            <span style={{
+              transform: openCategory === cat.key ? "rotate(90deg)" : "none",
+              transition: "transform 0.15s", fontSize: 9,
+            }}>▸</span>
+            <span>{cat.label}</span>
+          </button>
+
+          {openCategory === cat.key && (
+            <div style={{ marginLeft: 16 }}>
+              {cat.rows.map((r, i) => (
+                <button
+                  key={i}
+                  type="button"
+                  onClick={() => onOpenRiskArea(r.area)}
+                  title={`Open ${r.area}`}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 6, width: "100%",
+                    background: "transparent", border: "none", cursor: "pointer",
+                    color: "#e2e8f0", fontSize: 11.5, padding: "3px 0", textAlign: "left",
+                  }}
+                >
+                  <span style={{ width: 6, height: 6, borderRadius: "50%", background: cat.color, flexShrink: 0 }} />
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.area}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function DocumentHistoryDrilldown({ file, project, agentReportsByDoc, loadDocAgentCache }) {
   const docId = file?.reportId;
   const inMemory  = docId ? agentReportsByDoc[docId] : null;
@@ -1087,6 +1170,11 @@ function App() {
   // screen (Level 2: agents + risk area progress). Null means show the
   // Level 1 list of this project's documents instead.
   const [historyDrillDoc, setHistoryDrillDoc]       = useState(null);
+  // Set when a specific risk area is clicked from the sidebar's Gap
+  // Analysis dropdown, so the Chatbot component (once its report is
+  // loaded) can jump straight to that risk's detail modal instead of
+  // just opening the agent and leaving the user to scroll to find it.
+  const [pendingOpenRiskArea, setPendingOpenRiskArea] = useState(null);
   const [qaPopupOpen,        setQaPopupOpen]        = useState(false);
   const [selectedProjectItem, setSelectedProjectItem] = useState(null);
   const [activeProjectAgent, setActiveProjectAgent]   = useState(null);
@@ -1724,6 +1812,15 @@ function App() {
     }
   }
 
+  // Same as openDocumentAgent, but also records which SPECIFIC risk area
+  // was clicked (from the sidebar's Gap Analysis dropdown), so once the
+  // Chatbot component's report is loaded it jumps straight to that
+  // risk's detail modal instead of leaving the user to scroll for it.
+  function openDocumentAgentRiskArea(file, agentKey, area) {
+    setPendingOpenRiskArea({ docId: file.reportId, agentId: agentKey, area });
+    openDocumentAgent(file, agentKey);
+  }
+
   async function openManagerChat(report) {
     const id = getReportId(report);
     setSelectedReportId(id);
@@ -2083,6 +2180,14 @@ function App() {
               preGeneratedReport={agentReports[selectedAgent?.id || "audit_planning_agent"]?.preGenerated}
               preGenerating={agentReports[selectedAgent?.id || "audit_planning_agent"]?.preGenerating}
               onReportGenerated={(content) => updateAgentReport(selectedAgent?.id || "audit_planning_agent", { content, preGenerated: { answer: content } })}
+              openRiskArea={
+                pendingOpenRiskArea &&
+                pendingOpenRiskArea.docId === selectedReportId &&
+                pendingOpenRiskArea.agentId === (selectedAgent?.id || "audit_planning_agent")
+                  ? pendingOpenRiskArea.area
+                  : null
+              }
+              onRiskAreaOpened={() => setPendingOpenRiskArea(null)}
             />
           </div>
         )}
