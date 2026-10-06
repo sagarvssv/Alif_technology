@@ -331,9 +331,39 @@ function getRiskSolutions(area = "") {
   ];
 }
 
+// A risk cell can carry an exact percentage after the level name, e.g.
+// "Medium-High (67%)". The name decides colour/category; the number
+// decides the bar.
+const RISK_PCT_SUFFIX = /\s*\((\d{1,3})\s*%\)\s*$/;
+function splitRiskLabel(raw = "") {
+  const text = String(raw || "");
+  const m = text.match(RISK_PCT_SUFFIX);
+  return { label: text.replace(RISK_PCT_SUFFIX, "").trim(), pct: m ? Number(m[1]) : null };
+}
+
 function getRisk(raw = "") {
-  const key = raw.toLowerCase().trim();
-  return RISK_LEVELS[key] || RISK_LEVELS[key.replace("–", "-")] || null;
+  const { label, pct } = splitRiskLabel(raw);
+  const key = label.toLowerCase();
+  const cfg = RISK_LEVELS[key] || RISK_LEVELS[key.replace("–", "-")] || null;
+  if (!cfg) return null;
+  return pct == null ? cfg : { ...cfg, pct };
+}
+
+// ── Risk from checklist progress (same formula as the risk_review Lambda) ──
+// The percentage drops by an equal share for every item done (either
+// checklist), from the ORIGINAL level down to Low (20%) when all are done.
+// The level name is the lowest level whose percentage is still >= the
+// current %, so the name never claims less risk than the number.
+const RISK_FLOOR_PCT = 20;
+function computeRiskFromProgress(baseLevel, doneCount, total) {
+  const base = splitRiskLabel(baseLevel).label;
+  const basePct = getRisk(base)?.pct ?? 90;
+  if (total === 0 || doneCount === 0) return { label: base, pct: basePct, changed: false };
+  const pct = doneCount >= total
+    ? Math.min(basePct, RISK_FLOOR_PCT)
+    : Math.round(basePct - (basePct - RISK_FLOOR_PCT) * (doneCount / total));
+  const label = RISK_LEVEL_ORDER.find((l) => RISK_LEVELS[l.toLowerCase()].pct >= pct) || "High";
+  return { label, pct, changed: true };
 }
 
 function isUnassessedRisk(raw = "") {
@@ -343,7 +373,7 @@ function isUnassessedRisk(raw = "") {
 // Deterministic level stepping. Same currentLabel + same steps ALWAYS
 // produces the same result — no AI involved in this calculation at all.
 function stepDownRiskLevel(currentLabel, steps) {
-  const normalized = (currentLabel || "").trim();
+  const normalized = splitRiskLabel(currentLabel).label;
   let index = RISK_LEVEL_ORDER.findIndex(
     (l) => l.toLowerCase() === normalized.toLowerCase()
   );
@@ -615,31 +645,6 @@ function summarizeChecklistProgress(items, mandatoryItems = []) {
   return { total, doneCount, note };
 }
 
-// FIX: the old flat two-tier scheme (1 step for "some done", 2 steps
-// only if "all done") meant 1-of-5 and 4-of-5 satisfied produced the
-// EXACT SAME risk level — clearly wrong, since 4/5 should read as
-// nearly resolved. This computes steps PROPORTIONALLY to how much of
-// the checklist is actually done, scaled against how many levels
-// separate the risk's ORIGINAL level from "Low" (never from whatever
-// the level currently is, so repeated updates never compound). Partial
-// completion is capped one step short of the fully-resolved level, so
-// "4 of 5 done" can never look identical to "5 of 5 done" — only a
-// complete checklist can reach the bottom level.
-function computeStepsFromChecklistProgress(baseLevel, doneCount, total) {
-  if (total === 0 || doneCount === 0) return 0;
-
-  const baseIndex = RISK_LEVEL_ORDER.findIndex(
-    (l) => l.toLowerCase() === (baseLevel || "").trim().toLowerCase()
-  );
-  const maxSteps = baseIndex === -1 ? RISK_LEVEL_ORDER.length - 1 : baseIndex;
-  if (maxSteps === 0) return 0; // already at the lowest level
-
-  if (doneCount === total) return maxSteps; // fully resolved -> drop straight to Low
-
-  const proportional = Math.round((doneCount / total) * maxSteps);
-  return Math.min(proportional, maxSteps - 1);
-}
-
 // FIX: builds a short status line reflecting how much of the checklist
 // is actually done, so the "what it means simply" description keeps up
 // with reality instead of forever reading like the original unresolved
@@ -652,7 +657,9 @@ function buildDescriptionStatusUpdate(doneCount, total) {
   if (doneCount === total) {
     return "All checklist items have now been confirmed — this risk has been substantially resolved.";
   }
-  return `${doneCount} of ${total} checklist items confirmed so far — largely addressed, with the remaining item(s) still outstanding.`;
+  const remaining = total - doneCount;
+  const progressWord = doneCount / total >= 0.5 ? "largely addressed" : "partially addressed";
+  return `${doneCount} of ${total} checklist items confirmed so far — ${progressWord}, ${remaining} item${remaining === 1 ? "" : "s"} still outstanding.`;
 }
 
 function applyChecklistProgressToReport(oldMarkdown, targetArea, baseLevel, items, mandatoryItems = []) {
@@ -664,15 +671,15 @@ function applyChecklistProgressToReport(oldMarkdown, targetArea, baseLevel, item
   const { total, doneCount, note } = summarizeChecklistProgress(items, mandatoryItems);
   if (total === 0) return oldMarkdown;
 
-  const steps = computeStepsFromChecklistProgress(baseLevel, doneCount, total);
-  const newLevelLabel = stepDownRiskLevel(baseLevel, steps);
+  const { label, pct, changed } = computeRiskFromProgress(baseLevel, doneCount, total);
+  const newLevelLabel = changed ? `${label} (${pct}%)` : label;
   const descriptionUpdate = buildDescriptionStatusUpdate(doneCount, total);
   lines[rowIndex] = rewriteRiskRow(lines[rowIndex], newLevelLabel, note, descriptionUpdate);
   return lines.join("\n");
 }
 
 // ─── Item Modal with Solutions ────────────────────────────────────────
-function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onRiskEvidenceRegenerated }) {
+function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onRiskEvidenceRegenerated, inline = false }) {
   const [showSolutions, setShowSolutions] = useState(false);
   const [showMandatoryChecklist, setShowMandatoryChecklist] = useState(false);
   if (!item) return null;
@@ -710,6 +717,20 @@ function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onR
   const [mandatoryItemFileResults, setMandatoryItemFileResults] = useState({});
   const [mandatoryJustificationOpenId, setMandatoryJustificationOpenId] = useState(null);
   const [mandatoryJustificationDraft, setMandatoryJustificationDraft]   = useState("");
+
+  // ── EVIDENCE ENGINE: refs/state shared by both checklists ───────────
+  const evidenceSaveChainRef   = useRef(Promise.resolve());
+  const evidenceCancelledRef   = useRef(new Set());
+  const evidenceClaimedIdsRef  = useRef(new Set());
+  const currentRiskKeyRef      = useRef(riskKey);
+  currentRiskKeyRef.current    = riskKey;
+  const latestReportContentRef = useRef(currentReportContent);
+  latestReportContentRef.current = currentReportContent;
+  const latestOnRegeneratedRef = useRef(onRiskEvidenceRegenerated);
+  latestOnRegeneratedRef.current = onRiskEvidenceRegenerated;
+  const [removingEvidenceKeys, setRemovingEvidenceKeys] = useState({});
+  // { "<kind>:<itemId>": { [rowId]: true } } — documents ticked for "Delete selected"
+  const [selectedEvidenceRows, setSelectedEvidenceRows] = useState({});
 
   useEffect(() => {
     let cancelled = false;
@@ -1053,7 +1074,7 @@ function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onR
         setChecklistError("Could not break this risk into a checklist. Showing the standard planned response instead.");
         return;
       }
-      await saveRiskUpdate({ setChecklist: items, baseRiskLevel: item.riskRaw });
+      await saveRiskUpdate({ setChecklist: items, baseRiskLevel: splitRiskLabel(item.riskRaw).label });
     } catch (err) {
       setChecklistError(err.message || "Failed to generate a checklist for this risk. Showing the standard planned response instead.");
     } finally {
@@ -1122,31 +1143,8 @@ function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onR
   // wrongly-uploaded file doesn't linger in the audit trail looking like
   // valid evidence for this item.
   async function handleCancelChecklistItem(checklistItem) {
-    const patch = {
-      updateChecklistItem: {
-        id: checklistItem.id,
-        satisfied: false,
-        satisfiedBy: null,
-        manuallyChecked: false,
-        justification: "",
-      },
-    };
-    if (checklistItem.satisfiedBy) {
-      patch.removeAttachment = { s3Key: checklistItem.satisfiedBy };
-    }
-    const result = await saveRiskUpdate(patch);
+    await undoChecklistItemWithEvidence("ai", checklistItem);
     setItemFileResults((prev) => ({ ...prev, [checklistItem.id]: [] }));
-    if (result) {
-      const baseLevel = result.checklistBaseLevel || item.riskRaw;
-      const mergedContent = applyChecklistProgressToReport(
-        currentReportContent,
-        item.area,
-        baseLevel,
-        result.checklistItems || [],
-        result.mandatoryChecklistItems || []
-      );
-      onRiskEvidenceRegenerated?.(mergedContent);
-    }
   }
 
   // Runs the same deterministic relevanceCheck route as the whole-risk
@@ -1202,132 +1200,466 @@ function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onR
     }
   }
 
-  // Upload scoped to ONE checklist item. Saves the file as an
-  // attachment (so it still shows in the overall Supporting Documents
-  // list) AND checks it only against this one item's requirement.
-  async function handleItemFileSelect(checklistItem, e) {
-    const files = Array.from(e.target.files || []);
-    if (files.length === 0 || !reportId) return;
-    setItemUploadState((prev) => ({ ...prev, [checklistItem.id]: { uploading: true, stage: "" } }));
-    // Fresh results list for this upload batch, so old results from a
-    // previous session don't linger mixed in with new ones.
-    setItemFileResults((prev) => ({ ...prev, [checklistItem.id]: [] }));
+  // ═══════════════════════════════════════════════════════════════════
+  // EVIDENCE ENGINE — shared by BOTH checklists ("ai" = Planned Audit
+  // Response, "mandatory" = Mandatory Checklist).
+  //
+  // • Every selected file gets its own row immediately, with a live
+  //   status and a Cancel button at every stage.
+  // • Files are processed in parallel; saves are queued one at a time
+  //   because the risk record is read-modify-write on the server.
+  // • The server decides satisfied/unsatisfied from the verdict
+  //   (newAttachment.itemId/checklist/verdict), never downgrades, and
+  //   removeAttachment is a complete undo.
+  // • Saved results are rendered from review.attachments, so they
+  //   survive a page refresh. Local rows only hold files still in
+  //   progress (or failed).
+  // ═══════════════════════════════════════════════════════════════════
+
+  const EVIDENCE_STAGES = {
+    queued:     { step: 1, text: "Preparing…" },
+    uploading:  { step: 1, text: "Uploading…" },
+    extracting: { step: 2, text: "Extracting text… (usually 10–60 seconds)" },
+    checking:   { step: 3, text: "Checking against this item…" },
+    saving:     { step: 4, text: "Saving result…" },
+  };
+
+  function setEvidenceRows(kind) {
+    return kind === "mandatory" ? setMandatoryItemFileResults : setItemFileResults;
+  }
+
+  function newEvidenceRowId() {
+    return `row-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  function updateEvidenceRow(kind, itemId, rowId, patch) {
+    setEvidenceRows(kind)((prev) => ({
+      ...prev,
+      [itemId]: (prev[itemId] || []).map((r) => (r.rowId === rowId ? { ...r, ...patch } : r)),
+    }));
+  }
+
+  function dropEvidenceRow(kind, itemId, rowId) {
+    setEvidenceRows(kind)((prev) => ({
+      ...prev,
+      [itemId]: (prev[itemId] || []).filter((r) => r.rowId !== rowId),
+    }));
+  }
+
+  // PUTs one patch to a specific risk. Only updates the visible review if
+  // the user is still looking at that same risk.
+  async function putRiskPatch(patch, forRiskKey) {
     try {
-      let existingIds = new Set();
-      try {
-        const snapRes  = await fetch(`${RISK_DOCUMENTS_API}?portal=user`);
-        const snapData = await snapRes.json();
-        const snapList = snapData.reports || snapData.documents || snapData.items || [];
-        existingIds = new Set(
-          snapList.map((d) => d.reportId || d.documentId || d.document_id).filter(Boolean)
-        );
-      } catch {}
-
-      // Every file is checked individually and its OWN result is kept
-      // and shown separately — so uploading 2 files at once clearly
-      // shows "this one satisfied it, that one didn't" instead of one
-      // collapsed message. The item's saved satisfied/satisfiedBy state
-      // can only ever move from false -> true within this batch, never
-      // back down — so a later unrelated file can never undo an earlier
-      // one that genuinely satisfied the item.
-      let satisfiedNow   = !!checklistItem.satisfied;
-      let satisfiedByNow = checklistItem.satisfiedBy || null;
-
-      for (const file of files) {
-        setItemUploadState((prev) => ({
-          ...prev,
-          [checklistItem.id]: { uploading: true, stage: `Uploading ${file.name}…` },
-        }));
-        const urlRes = await fetch(RISK_ATTACHMENT_URL_API, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ file_name: file.name, content_type: file.type || "application/pdf" }),
-        });
-        const urlData   = await urlRes.json();
-        const uploadUrl = urlData.uploadUrl || urlData.upload_url || urlData.url || urlData.presignedUrl;
-        if (!uploadUrl) throw new Error(`Could not get an upload link for ${file.name}.`);
-
-        const putRes = await fetch(uploadUrl, {
-          method: "PUT",
-          headers: { "Content-Type": file.type || "application/pdf" },
-          body: file,
-        });
-        if (!putRes.ok) throw new Error(`Uploading ${file.name} to storage failed.`);
-
-        setItemUploadState((prev) => ({
-          ...prev,
-          [checklistItem.id]: { uploading: true, stage: `Extracting text from ${file.name}…` },
-        }));
-        const evidenceReportId = await waitForRiskEvidenceDocument(file.name, existingIds);
-        existingIds.add(evidenceReportId);
-
-        setItemUploadState((prev) => ({
-          ...prev,
-          [checklistItem.id]: { uploading: true, stage: `Checking ${file.name} against this item…` },
-        }));
-        const verdict = await checkChecklistItemRelevance(checklistItem, evidenceReportId);
-
-        setItemFileResults((prev) => ({
-          ...prev,
-          [checklistItem.id]: [
-            ...(prev[checklistItem.id] || []),
-            {
-              fileName: file.name,
-              s3Key: evidenceReportId,
-              relevant: verdict.relevant,
-              resolves_risk: verdict.resolves_risk,
-              reason: verdict.reason,
-              stillOutstanding: verdict.still_outstanding || "",
-            },
-          ],
-        }));
-
-        const fileSatisfies = !!(verdict.relevant && verdict.resolves_risk);
-        if (fileSatisfies && !satisfiedNow) {
-          satisfiedNow   = true;
-          satisfiedByNow = evidenceReportId;
-        }
-
-        const patchItem = { id: checklistItem.id, satisfied: satisfiedNow };
-        if (satisfiedNow) patchItem.satisfiedBy = satisfiedByNow;
-        if (fileSatisfies) patchItem.justification = verdict.reason || "";
-
-        const result = await saveRiskUpdate({
-          newAttachment: { fileName: file.name, s3Key: evidenceReportId },
-          updateChecklistItem: patchItem,
-        });
-        if (result) {
-          const baseLevel = result.checklistBaseLevel || item.riskRaw;
-          const mergedContent = applyChecklistProgressToReport(
-            currentReportContent,
-            item.area,
-            baseLevel,
-            result.checklistItems || [],
-            result.mandatoryChecklistItems || []
-          );
-          onRiskEvidenceRegenerated?.(mergedContent);
-        }
-      }
+      const res = await fetch(RISK_API(forRiskKey), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to save.");
+      if (forRiskKey === currentRiskKeyRef.current) setReview(data);
+      return data;
     } catch (err) {
-      setReviewError(err.message || "Failed to attach the document for this item. Please try again.");
-    } finally {
-      setItemUploadState((prev) => ({ ...prev, [checklistItem.id]: { uploading: false, stage: "" } }));
-      e.target.value = "";
+      if (forRiskKey === currentRiskKeyRef.current) {
+        setReviewError(err.message || "Failed to save your update. Please try again.");
+      }
+      return null;
     }
   }
 
-  // Removes ONE specific unrelated file's result from the display and
-  // deletes its attachment record — for cleaning up a wrongly-uploaded
-  // document that didn't satisfy this item, without touching the item's
-  // own satisfied state (it never contributed to it in the first place).
-  async function handleCancelFileResult(checklistItemId, fileResult) {
-    if (fileResult.s3Key) {
-      await saveRiskUpdate({ removeAttachment: { s3Key: fileResult.s3Key } });
+  function queueRiskSave(patch, forRiskKey = riskKey) {
+    const run = evidenceSaveChainRef.current.then(() => putRiskPatch(patch, forRiskKey));
+    evidenceSaveChainRef.current = run.catch(() => null);
+    return run;
+  }
+
+  function pushChecklistProgress(result, ctx) {
+    if (!result) return;
+    const baseLevel = result.checklistBaseLevel || ctx.riskRaw;
+    const mergedContent = applyChecklistProgressToReport(
+      latestReportContentRef.current,
+      ctx.area,
+      baseLevel,
+      result.checklistItems || [],
+      result.mandatoryChecklistItems || []
+    );
+    latestOnRegeneratedRef.current?.(mergedContent);
+  }
+
+  // Polls /documents until THIS file's record is COMPLETED. The match is
+  // claimed inside the same synchronous step that finds it, so two files
+  // processing in parallel can never grab the same record.
+  async function waitForEvidenceDocument(fileName, excludeIds, isCancelled) {
+    const normalize = (n) => (n || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    const target = normalize(fileName);
+    for (let attempt = 0; attempt < RISK_EVIDENCE_MAX_POLL_ATTEMPTS; attempt++) {
+      await sleep(RISK_EVIDENCE_POLL_INTERVAL_MS);
+      if (isCancelled()) return null;
+      try {
+        const res  = await fetch(`${RISK_DOCUMENTS_API}?portal=user`);
+        const data = await res.json();
+        const list = data.reports || data.documents || data.items || [];
+        const match = list.find((doc) => {
+          const id = doc.documentId || doc.reportId || doc.document_id || "";
+          if (!id || excludeIds.has(id) || evidenceClaimedIdsRef.current.has(id)) return false;
+          if (!["COMPLETED", "READY"].includes(doc.status || doc.processingStatus)) return false;
+          const name = normalize(doc.source_file || doc.sourceFile || doc.fileName || doc.file_name || "");
+          return name && name.endsWith(target);
+        });
+        if (match) {
+          const id = match.documentId || match.reportId || match.document_id;
+          evidenceClaimedIdsRef.current.add(id);
+          return id;
+        }
+      } catch {}
     }
-    setItemFileResults((prev) => ({
+    throw new Error("Text extraction took longer than 3 minutes.");
+  }
+
+  async function runItemRelevanceCheck(checklistText, evidenceId, ctx) {
+    const message = `Check evidence relevance for one checklist item under "${ctx.area}".`;
+    const res = await fetch(CHAT_API, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message,
+        question: message,
+        sessionId: `risk-item-relevance-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        reportId: evidenceId,
+        reportIds: [evidenceId],
+        selectedAgent: agentId,
+        agent: agentId,
+        generalMode: false,
+        general_mode: false,
+        relevanceCheck: {
+          riskArea: ctx.area,
+          riskDescription: ctx.description,
+          plannedResponse: checklistText,
+        },
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok && res.status !== 202) {
+      throw new Error(data.message || data.error || `Relevance check failed (${res.status}).`);
+    }
+    let final = data;
+    if (data.status === "processing" && data.jobId) {
+      final = await pollAgentJob(data.jobId);
+    }
+    const raw = final.answer || final.response || final.message || "";
+    try {
+      const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+      if (parsed && typeof parsed === "object") return parsed;
+    } catch {}
+    return {
+      relevant: false,
+      resolves_risk: false,
+      reason: "Could not read the assessment result.",
+      specifically_addressed: "",
+      still_outstanding: "",
+    };
+  }
+
+  async function processEvidenceFile(kind, checklistItem, file, rowId, excludeIds, ctx) {
+    const itemId = checklistItem.id;
+    const isCancelled = () => evidenceCancelledRef.current.has(rowId);
+    const contentType = file.type || "application/pdf";
+    try {
+      updateEvidenceRow(kind, itemId, rowId, { status: "uploading" });
+      const urlRes = await fetch(RISK_ATTACHMENT_URL_API, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ file_name: file.name, content_type: contentType }),
+      });
+      const urlData   = await urlRes.json();
+      const uploadUrl = urlData.upload_url || urlData.uploadUrl || urlData.url || urlData.presignedUrl;
+      if (!uploadUrl) throw new Error("Could not get an upload link.");
+      if (isCancelled()) return;
+
+      const putRes = await fetch(uploadUrl, { method: "PUT", headers: { "Content-Type": contentType }, body: file });
+      if (!putRes.ok) throw new Error(`Upload to storage failed (${putRes.status}).`);
+      if (isCancelled()) return;
+
+      updateEvidenceRow(kind, itemId, rowId, { status: "extracting" });
+      const evidenceId = await waitForEvidenceDocument(file.name, excludeIds, isCancelled);
+      if (!evidenceId || isCancelled()) return;
+
+      updateEvidenceRow(kind, itemId, rowId, { status: "checking", s3Key: evidenceId });
+      const verdict = await runItemRelevanceCheck(checklistItem.text, evidenceId, ctx);
+      if (isCancelled()) return;
+
+      updateEvidenceRow(kind, itemId, rowId, { status: "saving" });
+      const result = await queueRiskSave(
+        { newAttachment: { fileName: file.name, s3Key: evidenceId, itemId, checklist: kind, verdict } },
+        ctx.riskKey
+      );
+      if (!result) throw new Error("Could not save the result.");
+
+      if (isCancelled()) {
+        // Cancelled while the save was in flight: undo it straight away.
+        pushChecklistProgress(await queueRiskSave({ removeAttachment: { s3Key: evidenceId } }, ctx.riskKey), ctx);
+        return;
+      }
+      pushChecklistProgress(result, ctx);
+      // The saved attachment now renders from the server record.
+      dropEvidenceRow(kind, itemId, rowId);
+    } catch (err) {
+      if (!isCancelled()) {
+        updateEvidenceRow(kind, itemId, rowId, { status: "error", error: err.message || "Something went wrong." });
+      }
+    } finally {
+      evidenceCancelledRef.current.delete(rowId);
+    }
+  }
+
+  async function handleEvidenceFilesSelected(kind, checklistItem, e) {
+    const files = Array.from(e.target.files || []);
+    e.target.value = "";
+    if (files.length === 0 || !reportId) return;
+
+    const ctx = { riskKey, area: item.area, riskRaw: item.riskRaw, description: item.description };
+    const rows = files.map((f) => ({ rowId: newEvidenceRowId(), fileName: f.name, status: "queued" }));
+    setEvidenceRows(kind)((prev) => ({
       ...prev,
-      [checklistItemId]: (prev[checklistItemId] || []).filter((r) => r.s3Key !== fileResult.s3Key),
+      [checklistItem.id]: [...(prev[checklistItem.id] || []), ...rows],
     }));
+
+    // Snapshot existing documents BEFORE uploading, so an older document
+    // with the same name can never be mistaken for one of these.
+    let excludeIds = new Set();
+    try {
+      const snapRes  = await fetch(`${RISK_DOCUMENTS_API}?portal=user`);
+      const snapData = await snapRes.json();
+      const snapList = snapData.reports || snapData.documents || snapData.items || [];
+      excludeIds = new Set(snapList.map((d) => d.documentId || d.reportId || d.document_id).filter(Boolean));
+    } catch {}
+
+    await Promise.all(
+      files.map((file, i) => processEvidenceFile(kind, checklistItem, file, rows[i].rowId, excludeIds, ctx))
+    );
+  }
+
+  async function handleCancelEvidenceRow(kind, checklistItemId, row) {
+    if (row.persisted) {
+      setRemovingEvidenceKeys((prev) => ({ ...prev, [row.s3Key]: true }));
+      const ctx = { riskKey, area: item.area, riskRaw: item.riskRaw };
+      const result = await queueRiskSave({ removeAttachment: { s3Key: row.s3Key } }, ctx.riskKey);
+      pushChecklistProgress(result, ctx);
+      setRemovingEvidenceKeys((prev) => {
+        const next = { ...prev };
+        delete next[row.s3Key];
+        return next;
+      });
+      return;
+    }
+    if (row.status !== "error") evidenceCancelledRef.current.add(row.rowId);
+    dropEvidenceRow(kind, checklistItemId, row.rowId);
+  }
+
+  // Item-level "✕ Cancel" (next to "Satisfied" / "Manually confirmed"):
+  // removes every file that satisfied this item, then resets the item.
+  // Unrelated / partial files stay listed so the audit trail is kept.
+  async function undoChecklistItemWithEvidence(kind, checklistItem) {
+    const ctx = { riskKey, area: item.area, riskRaw: item.riskRaw };
+    const keys = new Set(
+      (review?.attachments || [])
+        .filter((a) => a.itemId === checklistItem.id && (a.checklist || "ai") === kind && a.s3Key
+          && a.verdict && a.verdict.relevant && a.verdict.resolves_risk)
+        .map((a) => a.s3Key)
+    );
+    if (checklistItem.satisfiedBy) keys.add(checklistItem.satisfiedBy);
+    for (const key of keys) {
+      await queueRiskSave({ removeAttachment: { s3Key: key } }, ctx.riskKey);
+    }
+    const field = kind === "mandatory" ? "updateMandatoryChecklistItem" : "updateChecklistItem";
+    const result = await queueRiskSave(
+      { [field]: { id: checklistItem.id, satisfied: false, satisfiedBy: null, manuallyChecked: false, justification: "" } },
+      ctx.riskKey
+    );
+    pushChecklistProgress(result, ctx);
+  }
+
+  function handleItemFileSelect(checklistItem, e) {
+    handleEvidenceFilesSelected("ai", checklistItem, e);
+  }
+
+  function handleMandatoryItemFileSelect(checklistItem, e) {
+    handleEvidenceFilesSelected("mandatory", checklistItem, e);
+  }
+
+  function toggleEvidenceSelected(kind, itemId, rowId) {
+    const key = `${kind}:${itemId}`;
+    setSelectedEvidenceRows((prev) => {
+      const current = { ...(prev[key] || {}) };
+      if (current[rowId]) delete current[rowId];
+      else current[rowId] = true;
+      return { ...prev, [key]: current };
+    });
+  }
+
+  function setAllEvidenceSelected(kind, itemId, rows, selectAll) {
+    const key = `${kind}:${itemId}`;
+    const next = {};
+    if (selectAll) rows.forEach((r) => { next[r.rowId] = true; });
+    setSelectedEvidenceRows((prev) => ({ ...prev, [key]: next }));
+  }
+
+  async function handleDeleteSelectedEvidence(kind, itemId, rows) {
+    const key = `${kind}:${itemId}`;
+    const selected = selectedEvidenceRows[key] || {};
+    const chosen = rows.filter((r) => selected[r.rowId]);
+    if (chosen.length === 0) return;
+    const names = chosen.map((r) => `• ${r.fileName}`).join("\n");
+    if (!window.confirm(`Delete ${chosen.length} document${chosen.length > 1 ? "s" : ""} from this item?\n\n${names}`)) return;
+    setSelectedEvidenceRows((prev) => ({ ...prev, [key]: {} }));
+    // Saved files are removed one at a time (queued); in-progress files stop immediately.
+    await Promise.all(chosen.map((r) => handleCancelEvidenceRow(kind, itemId, r)));
+  }
+
+  function renderEvidenceRow(kind, itemId, fr, selection) {
+    const processing = !fr.persisted && fr.status !== "error";
+    const failed     = !fr.persisted && fr.status === "error";
+    const isMatch    = fr.persisted && fr.relevant && fr.resolves_risk;
+    const isPartial  = fr.persisted && fr.relevant && !fr.resolves_risk;
+    const notRelated = fr.persisted && !fr.relevant;
+    const removing   = fr.persisted && removingEvidenceKeys[fr.s3Key];
+    const stage      = EVIDENCE_STAGES[fr.status] || EVIDENCE_STAGES.queued;
+
+    const boxStyle = processing
+      ? { background: "#f8fafc", border: "1px dashed #94a3b8" }
+      : failed
+        ? { background: "#fef2f2", border: "1px dashed #f87171" }
+        : isMatch
+          ? { background: "#f0fdf4", border: "1px solid #86efac" }
+          : isPartial
+            ? { background: "#fffbeb", border: "1px solid #fcd34d" }
+            : { background: "#fef2f2", border: "1px solid #fca5a5" };
+    const icon = processing ? "⏳" : failed ? "❌" : isMatch ? "✅" : isPartial ? "🟡" : "⚠️";
+    const cancelTitle = processing
+      ? "Stop processing this file"
+      : failed
+        ? "Dismiss this failed upload"
+        : isMatch
+          ? "Remove this file (the item will be un-ticked unless another file also satisfies it)"
+          : "Remove this file";
+
+    return (
+      <div key={fr.rowId} style={{ ...boxStyle, borderRadius: 8, padding: "8px 10px", opacity: removing ? 0.6 : 1 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+          <div style={{ fontSize: 12.5, fontWeight: 700, color: "#1e293b", display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+            {selection?.show && (
+              <input
+                type="checkbox"
+                checked={!!selection.checked}
+                disabled={!!removing}
+                onChange={() => toggleEvidenceSelected(kind, itemId, fr.rowId)}
+                title="Select this document"
+                style={{ width: 15, height: 15, cursor: "pointer", accentColor: "#dc2626", flexShrink: 0 }}
+              />
+            )}
+            <span>{icon}</span>
+            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{fr.fileName}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => handleCancelEvidenceRow(kind, itemId, fr)}
+            disabled={!!removing}
+            title={cancelTitle}
+            style={{
+              fontSize: 11, fontWeight: 600, color: "#b91c1c",
+              background: "transparent", border: "1px solid #fca5a5",
+              borderRadius: 999, padding: "1px 8px", cursor: removing ? "default" : "pointer", flexShrink: 0,
+            }}
+          >
+            {removing ? "Removing…" : "✕ Cancel"}
+          </button>
+        </div>
+        <div style={{ fontSize: 12, color: failed ? "#b91c1c" : "#475569", marginTop: 3 }}>
+          {processing && `Step ${stage.step} of 4 — ${stage.text}`}
+          {failed && `Failed — ${fr.error} Click Cancel to dismiss, then upload again.`}
+          {isMatch && "Related — this document satisfies this item."}
+          {isPartial && `Related, but not conclusive yet — ${fr.stillOutstanding || fr.reason}`}
+          {notRelated && "Not related to this specific item."}
+        </div>
+      </div>
+    );
+  }
+
+  function renderEvidenceSection(kind, ci, isDone) {
+    const persisted = (review?.attachments || [])
+      .filter((a) => a.itemId === ci.id && (a.checklist || "ai") === kind && a.verdict && a.s3Key)
+      .map((a) => ({
+        rowId: `saved-${a.s3Key}`,
+        persisted: true,
+        fileName: a.fileName,
+        s3Key: a.s3Key,
+        relevant: !!a.verdict.relevant,
+        resolves_risk: !!a.verdict.resolves_risk,
+        reason: a.verdict.reason || "",
+        stillOutstanding: a.verdict.still_outstanding || "",
+      }));
+    const savedKeys = new Set(persisted.map((r) => r.s3Key));
+    const localRows = ((kind === "mandatory" ? mandatoryItemFileResults : itemFileResults)[ci.id] || [])
+      .filter((r) => !(r.s3Key && savedKeys.has(r.s3Key)));
+    const rows = [...persisted, ...localRows];
+    const anyInFlight = localRows.some((r) => r.status !== "error");
+    const showSelection = rows.length >= 2;
+    const selectedMap = selectedEvidenceRows[`${kind}:${ci.id}`] || {};
+    const selectedCount = rows.filter((r) => selectedMap[r.rowId]).length;
+    const allSelected = rows.length > 0 && selectedCount === rows.length;
+
+    return (
+      <>
+        <label className="risk-review-upload-btn"
+          style={{ marginTop: 8, display: "inline-block", fontSize: 12, padding: "4px 10px" }}>
+          <input
+            type="file"
+            multiple
+            onChange={(e) => handleEvidenceFilesSelected(kind, ci, e)}
+            style={{ display: "none" }}
+          />
+          {anyInFlight || rows.length > 0 ? "📎 Upload more files" : "📎 Upload for this item"}
+        </label>
+        {rows.length > 0 && (
+          <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+            {showSelection && (
+              <div style={{
+                display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap",
+                padding: "6px 10px", borderRadius: 8, background: "#f1f5f9", border: "1px solid #e2e8f0",
+              }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: "#334155", cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={allSelected}
+                    onChange={() => setAllEvidenceSelected(kind, ci.id, rows, !allSelected)}
+                    style={{ width: 15, height: 15, cursor: "pointer", accentColor: "#dc2626" }}
+                  />
+                  Select all ({rows.length} documents)
+                </label>
+                <button
+                  type="button"
+                  onClick={() => handleDeleteSelectedEvidence(kind, ci.id, rows)}
+                  disabled={selectedCount === 0}
+                  style={{
+                    fontSize: 11.5, fontWeight: 700, borderRadius: 999, padding: "3px 11px",
+                    color: selectedCount === 0 ? "#94a3b8" : "#fff",
+                    background: selectedCount === 0 ? "transparent" : "#dc2626",
+                    border: selectedCount === 0 ? "1px solid #cbd5e1" : "1px solid #dc2626",
+                    cursor: selectedCount === 0 ? "default" : "pointer",
+                  }}
+                >
+                  🗑 Delete selected{selectedCount > 0 ? ` (${selectedCount})` : ""}
+                </button>
+              </div>
+            )}
+            {rows.map((fr) => renderEvidenceRow(kind, ci.id, fr, {
+              show: showSelection,
+              checked: !!selectedMap[fr.rowId],
+            }))}
+          </div>
+        )}
+      </>
+    );
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -1388,31 +1720,8 @@ function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onR
   }
 
   async function handleCancelMandatoryChecklistItem(checklistItem) {
-    const patch = {
-      updateMandatoryChecklistItem: {
-        id: checklistItem.id,
-        satisfied: false,
-        satisfiedBy: null,
-        manuallyChecked: false,
-        justification: "",
-      },
-    };
-    if (checklistItem.satisfiedBy) {
-      patch.removeAttachment = { s3Key: checklistItem.satisfiedBy };
-    }
-    const result = await saveRiskUpdate(patch);
+    await undoChecklistItemWithEvidence("mandatory", checklistItem);
     setMandatoryItemFileResults((prev) => ({ ...prev, [checklistItem.id]: [] }));
-    if (result) {
-      const baseLevel = result.checklistBaseLevel || item.riskRaw;
-      const mergedContent = applyChecklistProgressToReport(
-        currentReportContent,
-        item.area,
-        baseLevel,
-        result.checklistItems || [],
-        result.mandatoryChecklistItems || []
-      );
-      onRiskEvidenceRegenerated?.(mergedContent);
-    }
   }
 
   async function checkMandatoryChecklistItemRelevance(checklistItem, evidenceReportId) {
@@ -1464,126 +1773,24 @@ function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onR
     }
   }
 
-  async function handleMandatoryItemFileSelect(checklistItem, e) {
-    const files = Array.from(e.target.files || []);
-    if (files.length === 0 || !reportId) return;
-    setMandatoryItemUploadState((prev) => ({ ...prev, [checklistItem.id]: { uploading: true, stage: "" } }));
-    setMandatoryItemFileResults((prev) => ({ ...prev, [checklistItem.id]: [] }));
-    try {
-      let existingIds = new Set();
-      try {
-        const snapRes  = await fetch(`${RISK_DOCUMENTS_API}?portal=user`);
-        const snapData = await snapRes.json();
-        const snapList = snapData.reports || snapData.documents || snapData.items || [];
-        existingIds = new Set(
-          snapList.map((d) => d.reportId || d.documentId || d.document_id).filter(Boolean)
-        );
-      } catch {}
-
-      let satisfiedNow   = !!checklistItem.satisfied;
-      let satisfiedByNow = checklistItem.satisfiedBy || null;
-
-      for (const file of files) {
-        setMandatoryItemUploadState((prev) => ({
-          ...prev,
-          [checklistItem.id]: { uploading: true, stage: `Uploading ${file.name}…` },
-        }));
-        const urlRes = await fetch(RISK_ATTACHMENT_URL_API, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ file_name: file.name, content_type: file.type || "application/pdf" }),
-        });
-        const urlData   = await urlRes.json();
-        const uploadUrl = urlData.uploadUrl || urlData.upload_url || urlData.url || urlData.presignedUrl;
-        if (!uploadUrl) throw new Error(`Could not get an upload link for ${file.name}.`);
-
-        const putRes = await fetch(uploadUrl, {
-          method: "PUT",
-          headers: { "Content-Type": file.type || "application/pdf" },
-          body: file,
-        });
-        if (!putRes.ok) throw new Error(`Uploading ${file.name} to storage failed.`);
-
-        setMandatoryItemUploadState((prev) => ({
-          ...prev,
-          [checklistItem.id]: { uploading: true, stage: `Extracting text from ${file.name}…` },
-        }));
-        const evidenceReportId = await waitForRiskEvidenceDocument(file.name, existingIds);
-        existingIds.add(evidenceReportId);
-
-        setMandatoryItemUploadState((prev) => ({
-          ...prev,
-          [checklistItem.id]: { uploading: true, stage: `Checking ${file.name} against this item…` },
-        }));
-        const verdict = await checkMandatoryChecklistItemRelevance(checklistItem, evidenceReportId);
-
-        setMandatoryItemFileResults((prev) => ({
-          ...prev,
-          [checklistItem.id]: [
-            ...(prev[checklistItem.id] || []),
-            {
-              fileName: file.name,
-              s3Key: evidenceReportId,
-              relevant: verdict.relevant,
-              resolves_risk: verdict.resolves_risk,
-              reason: verdict.reason,
-              stillOutstanding: verdict.still_outstanding || "",
-            },
-          ],
-        }));
-
-        const fileSatisfies = !!(verdict.relevant && verdict.resolves_risk);
-        if (fileSatisfies && !satisfiedNow) {
-          satisfiedNow   = true;
-          satisfiedByNow = evidenceReportId;
-        }
-
-        const patchItem = { id: checklistItem.id, satisfied: satisfiedNow };
-        if (satisfiedNow) patchItem.satisfiedBy = satisfiedByNow;
-        if (fileSatisfies) patchItem.justification = verdict.reason || "";
-
-        const result = await saveRiskUpdate({
-          newAttachment: { fileName: file.name, s3Key: evidenceReportId },
-          updateMandatoryChecklistItem: patchItem,
-        });
-        if (result) {
-          const baseLevel = result.checklistBaseLevel || item.riskRaw;
-          const mergedContent = applyChecklistProgressToReport(
-            currentReportContent,
-            item.area,
-            baseLevel,
-            result.checklistItems || [],
-            result.mandatoryChecklistItems || []
-          );
-          onRiskEvidenceRegenerated?.(mergedContent);
-        }
-      }
-    } catch (err) {
-      setReviewError(err.message || "Failed to attach the document for this item. Please try again.");
-    } finally {
-      setMandatoryItemUploadState((prev) => ({ ...prev, [checklistItem.id]: { uploading: false, stage: "" } }));
-      e.target.value = "";
-    }
-  }
-
-  async function handleCancelMandatoryFileResult(checklistItemId, fileResult) {
-    if (fileResult.s3Key) {
-      await saveRiskUpdate({ removeAttachment: { s3Key: fileResult.s3Key } });
-    }
-    setMandatoryItemFileResults((prev) => ({
-      ...prev,
-      [checklistItemId]: (prev[checklistItemId] || []).filter((r) => r.s3Key !== fileResult.s3Key),
-    }));
-  }
-
   return (
-    <div className="gap-modal-overlay" onClick={onClose}>
-      <div className="gap-modal" onClick={(e) => e.stopPropagation()}>
+    <div
+      className={inline ? "" : "gap-modal-overlay"}
+      onClick={inline ? undefined : onClose}
+      style={inline ? { gridColumn: "1 / -1", width: "100%" } : undefined}
+    >
+      <div className="gap-modal" onClick={(e) => e.stopPropagation()}
+        style={inline ? {
+          position: "static", maxWidth: "100%", maxHeight: "none",
+          width: "100%", margin: "4px 0 8px", boxShadow: "0 2px 14px rgba(0,0,0,0.12)",
+          border: "1px solid #e2e8f0",
+        } : undefined}
+      >
         <div className="gap-modal-header"
           style={{ background: item.needsGap ? "#7f1d1d" : "#14532d" }}>
           <div className="gap-modal-title">{item.needsGap ? "⚠️" : "✅"} {item.area}</div>
           <div className="gap-modal-desc">{item.description}</div>
-          <button className="gap-modal-close" onClick={onClose}>← Back to Report</button>
+          <button className="gap-modal-close" onClick={onClose}>{inline ? "▲ Collapse" : "← Back to Report"}</button>
         </div>
 
         <div style={{ padding: "20px" }}>
@@ -1623,6 +1830,35 @@ function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onR
               {item.pct}% risk
             </div>
           </div>
+
+          {review?.riskLevel?.available && review.riskLevel.total > 0 && (() => {
+            const lv = review.riskLevel;
+            const improved = lv.classification === "Improved / Low Risk";
+            const next = lv.itemsNeededForNextDrop;
+            return (
+              <div style={{
+                marginTop: 8, padding: "8px 12px", borderRadius: 10,
+                background: improved ? "#f0fdf4" : "#f8fafc",
+                border: improved ? "1px solid #86efac" : "1px solid #e2e8f0",
+                fontSize: 12.5, color: "#334155", lineHeight: 1.6,
+              }}>
+                <div>
+                  <strong>Progress:</strong> {lv.doneCount} of {lv.total} items done
+                  {" "}({lv.aiChecklist.done}/{lv.aiChecklist.total} Planned Audit Response,
+                  {" "}{lv.mandatoryChecklist.done}/{lv.mandatoryChecklist.total} Mandatory Checklist)
+                </div>
+                <div style={{ color: "#475569" }}>
+                  Started at {lv.originalLevel} ({lv.originalPct}%)
+                  {improved
+                    ? <span style={{ color: "#166534", fontWeight: 600 }}> · ✅ Improved / Low Risk</span>
+                    : <>
+                        {next && lv.pctPerItem ? ` · each item done lowers risk by about ${Math.round(lv.pctPerItem)}%` : ""}
+                        {lv.itemsNeededForImproved ? ` · "Improved" after ${lv.itemsNeededForImproved} more` : ""}
+                      </>}
+                </div>
+              </div>
+            );
+          })()}
 
           <div className="single-section">
             <div className="single-section-label">📄 Risk Description</div>
@@ -1781,66 +2017,7 @@ function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onR
                               </div>
                             )}
 
-                            {!isDone && (
-                              <label className="risk-review-upload-btn"
-                                style={{ marginTop: 8, display: "inline-block", fontSize: 12, padding: "4px 10px" }}>
-                                <input
-                                  type="file"
-                                  multiple
-                                  onChange={(e) => handleItemFileSelect(ci, e)}
-                                  disabled={uploadState.uploading}
-                                  style={{ display: "none" }}
-                                />
-                                {uploadState.uploading ? (uploadState.stage || "Processing…") : "📎 Upload for this item"}
-                              </label>
-                            )}
-
-                            {(itemFileResults[ci.id] || []).length > 0 && (
-                              <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
-                                {itemFileResults[ci.id].map((fr) => {
-                                  const isMatch    = fr.relevant && fr.resolves_risk;
-                                  const isPartial  = fr.relevant && !fr.resolves_risk;
-                                  const notRelated = !fr.relevant;
-                                  const boxStyle = isMatch
-                                    ? { background: "#f0fdf4", border: "1px solid #86efac" }
-                                    : isPartial
-                                      ? { background: "#fffbeb", border: "1px solid #fcd34d" }
-                                      : { background: "#fef2f2", border: "1px solid #fca5a5" };
-                                  return (
-                                    <div key={fr.s3Key} style={{
-                                      ...boxStyle, borderRadius: 8, padding: "8px 10px",
-                                    }}>
-                                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
-                                        <div style={{ fontSize: 12.5, fontWeight: 700, color: "#1e293b", display: "flex", alignItems: "center", gap: 6 }}>
-                                          <span>{isMatch ? "✅" : isPartial ? "🟡" : "⚠️"}</span>
-                                          <span>{fr.fileName}</span>
-                                        </div>
-                                        {notRelated && (
-                                          <button
-                                            type="button"
-                                            onClick={() => handleCancelFileResult(ci.id, fr)}
-                                            disabled={saving}
-                                            title="Remove this unrelated document"
-                                            style={{
-                                              fontSize: 11, fontWeight: 600, color: "#b91c1c",
-                                              background: "transparent", border: "1px solid #fca5a5",
-                                              borderRadius: 999, padding: "1px 8px", cursor: "pointer",
-                                            }}
-                                          >
-                                            ✕ Cancel
-                                          </button>
-                                        )}
-                                      </div>
-                                      <div style={{ fontSize: 12, color: "#475569", marginTop: 3 }}>
-                                        {isMatch && "Related — this document satisfies this item."}
-                                        {isPartial && `Related, but not conclusive yet — ${fr.stillOutstanding || fr.reason}`}
-                                        {notRelated && "Not related to this specific item."}
-                                      </div>
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            )}
+                            {renderEvidenceSection("ai", ci, isDone)}
                           </div>
                         </div>
 
@@ -2122,64 +2299,7 @@ function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onR
                               </div>
                             )}
 
-                            {!isDone && (
-                              <label className="risk-review-upload-btn"
-                                style={{ marginTop: 8, display: "inline-block", fontSize: 12, padding: "4px 10px" }}>
-                                <input
-                                  type="file"
-                                  multiple
-                                  onChange={(e) => handleMandatoryItemFileSelect(ci, e)}
-                                  disabled={uploadState.uploading}
-                                  style={{ display: "none" }}
-                                />
-                                {uploadState.uploading ? (uploadState.stage || "Processing…") : "📎 Upload for this item"}
-                              </label>
-                            )}
-
-                            {(mandatoryItemFileResults[ci.id] || []).length > 0 && (
-                              <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
-                                {mandatoryItemFileResults[ci.id].map((fr) => {
-                                  const isMatch    = fr.relevant && fr.resolves_risk;
-                                  const isPartial  = fr.relevant && !fr.resolves_risk;
-                                  const notRelated = !fr.relevant;
-                                  const boxStyle = isMatch
-                                    ? { background: "#f0fdf4", border: "1px solid #86efac" }
-                                    : isPartial
-                                      ? { background: "#fffbeb", border: "1px solid #fcd34d" }
-                                      : { background: "#fef2f2", border: "1px solid #fca5a5" };
-                                  return (
-                                    <div key={fr.s3Key} style={{ ...boxStyle, borderRadius: 8, padding: "8px 10px" }}>
-                                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
-                                        <div style={{ fontSize: 12.5, fontWeight: 700, color: "#1e293b", display: "flex", alignItems: "center", gap: 6 }}>
-                                          <span>{isMatch ? "✅" : isPartial ? "🟡" : "⚠️"}</span>
-                                          <span>{fr.fileName}</span>
-                                        </div>
-                                        {notRelated && (
-                                          <button
-                                            type="button"
-                                            onClick={() => handleCancelMandatoryFileResult(ci.id, fr)}
-                                            disabled={saving}
-                                            title="Remove this unrelated document"
-                                            style={{
-                                              fontSize: 11, fontWeight: 600, color: "#b91c1c",
-                                              background: "transparent", border: "1px solid #fca5a5",
-                                              borderRadius: 999, padding: "1px 8px", cursor: "pointer",
-                                            }}
-                                          >
-                                            ✕ Cancel
-                                          </button>
-                                        )}
-                                      </div>
-                                      <div style={{ fontSize: 12, color: "#475569", marginTop: 3 }}>
-                                        {isMatch && "Related — this document satisfies this item."}
-                                        {isPartial && `Related, but not conclusive yet — ${fr.stillOutstanding || fr.reason}`}
-                                        {notRelated && "Not related to this specific item."}
-                                      </div>
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            )}
+                            {renderEvidenceSection("mandatory", ci, isDone)}
                           </div>
                         </div>
 
@@ -2288,7 +2408,7 @@ function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onR
           </div>
           {/* ── END ADD-ON ─────────────────────────────────────────── */}
 
-          <button className="back-btn" onClick={onClose}>← Back to Report</button>
+          <button className="back-btn" onClick={onClose}>{inline ? "▲ Collapse" : "← Back to Report"}</button>
         </div>
       </div>
     </div>
@@ -2296,7 +2416,7 @@ function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onR
 }
 
 // ─── Gap Analysis Panel ───────────────────────────────────────────────
-function GapAnalysisPanel({ riskData, onItemClick }) {
+function GapAnalysisPanel({ riskData, onItemClick, modalItem, reportId, agentId, currentReportContent, onRiskEvidenceRegenerated }) {
   const [filter, setFilter] = useState("all");
   if (!riskData) return null;
   const { improved, needsAttention } = riskData;
@@ -2309,7 +2429,7 @@ function GapAnalysisPanel({ riskData, onItemClick }) {
       <div className="gap-panel-header">
         <div className="gap-panel-title">📊 Audit Gap Analysis — Full Summary</div>
         <div className="gap-panel-desc">
-          Click a scorecard to filter, or click any card to view details and solutions.
+          Click a scorecard to filter, or click any card to expand its details inline.
         </div>
         <div className="gap-scorecard">
           <button
@@ -2333,31 +2453,45 @@ function GapAnalysisPanel({ riskData, onItemClick }) {
             ⚠️ Needs Attention — {needsAttention.length} area{needsAttention.length > 1 ? "s" : ""} require priority audit focus
           </div>
           <div className="gap-grid">
-            {needsAttention.map((g, i) => (
-              <div key={i} className="gap-card attention-card gap-card-clickable"
-                onClick={() => onItemClick(g)}>
-                <div className="gap-card-header">
-                  <span className="gap-card-area">{g.area}</span>
-                  <span className="gap-pct-pill" style={{ background: g.bg, color: g.text }}>
-                    <span className="gap-mini-track">
-                      <span className="gap-mini-fill" style={{ width: `${g.pct}%`, background: g.bar }} />
+            {needsAttention.map((g, i) => {
+              const isExpanded = modalItem && modalItem.area === g.area;
+              return (
+                <div key={i} className={`gap-card attention-card gap-card-clickable ${isExpanded ? "gap-card-expanded" : ""}`}
+                  onClick={() => onItemClick(g)}>
+                  <div className="gap-card-header">
+                    <span className="gap-card-area">{g.area}</span>
+                    <span className="gap-pct-pill" style={{ background: g.bg, color: g.text }}>
+                      <span className="gap-mini-track">
+                        <span className="gap-mini-fill" style={{ width: `${g.pct}%`, background: g.bar }} />
+                      </span>
+                      {g.pct}% risk
                     </span>
-                    {g.pct}% risk
-                  </span>
-                </div>
-                <p className="gap-card-fact">{g.description}</p>
-                {g.response && (
-                  <div className="gap-card-action">
-                    <span className="gap-action-label">📌 Planned Response:</span>
-                    {g.response}
                   </div>
-                )}
-                <button className="gap-card-btn attention-btn"
-                  onClick={(e) => { e.stopPropagation(); onItemClick(g); }}>
-                  ⚠️ View Details & Solutions
-                </button>
-              </div>
-            ))}
+                  <p className="gap-card-fact">{g.description}</p>
+                  {g.response && (
+                    <div className="gap-card-action">
+                      <span className="gap-action-label">📌 Planned Response:</span>
+                      {g.response}
+                    </div>
+                  )}
+                  <button className="gap-card-btn attention-btn"
+                    onClick={(e) => { e.stopPropagation(); onItemClick(g); }}>
+                    {isExpanded ? "▲ Hide Details" : "⚠️ View Details & Solutions"}
+                  </button>
+                </div>
+              );
+            })}
+            {modalItem && needsAttention.some((g) => g.area === modalItem.area) && (
+              <ItemModal
+                item={modalItem}
+                onClose={() => onItemClick(modalItem)}
+                reportId={reportId}
+                agentId={agentId}
+                currentReportContent={currentReportContent}
+                onRiskEvidenceRegenerated={onRiskEvidenceRegenerated}
+                inline
+              />
+            )}
           </div>
         </div>
       )}
@@ -2368,26 +2502,40 @@ function GapAnalysisPanel({ riskData, onItemClick }) {
             ✅ Improved / Low Risk — {improved.length} area{improved.length > 1 ? "s" : ""} are well controlled
           </div>
           <div className="gap-grid">
-            {improved.map((g, i) => (
-              <div key={i} className="gap-card ok-card gap-card-clickable"
-                onClick={() => onItemClick(g)}>
-                <div className="gap-card-header">
-                  <span className="gap-card-area">{g.area}</span>
-                  <span className="gap-pct-pill" style={{ background: g.bg, color: g.text }}>
-                    <span className="gap-mini-track">
-                      <span className="gap-mini-fill" style={{ width: `${g.pct}%`, background: g.bar }} />
+            {improved.map((g, i) => {
+              const isExpanded = modalItem && modalItem.area === g.area;
+              return (
+                <div key={i} className={`gap-card ok-card gap-card-clickable ${isExpanded ? "gap-card-expanded" : ""}`}
+                  onClick={() => onItemClick(g)}>
+                  <div className="gap-card-header">
+                    <span className="gap-card-area">{g.area}</span>
+                    <span className="gap-pct-pill" style={{ background: g.bg, color: g.text }}>
+                      <span className="gap-mini-track">
+                        <span className="gap-mini-fill" style={{ width: `${g.pct}%`, background: g.bar }} />
+                      </span>
+                      {g.pct}% risk
                     </span>
-                    {g.pct}% risk
-                  </span>
+                  </div>
+                  <p className="gap-card-fact">{g.description}</p>
+                  <div className="gap-card-ok">✅ Standard audit procedures apply.</div>
+                  <button className="gap-card-btn ok-btn-card"
+                    onClick={(e) => { e.stopPropagation(); onItemClick(g); }}>
+                    {isExpanded ? "▲ Hide Details" : "✅ View Full Details"}
+                  </button>
                 </div>
-                <p className="gap-card-fact">{g.description}</p>
-                <div className="gap-card-ok">✅ Standard audit procedures apply.</div>
-                <button className="gap-card-btn ok-btn-card"
-                  onClick={(e) => { e.stopPropagation(); onItemClick(g); }}>
-                  ✅ View Full Details
-                </button>
-              </div>
-            ))}
+              );
+            })}
+            {modalItem && improved.some((g) => g.area === modalItem.area) && (
+              <ItemModal
+                item={modalItem}
+                onClose={() => onItemClick(modalItem)}
+                reportId={reportId}
+                agentId={agentId}
+                currentReportContent={currentReportContent}
+                onRiskEvidenceRegenerated={onRiskEvidenceRegenerated}
+                inline
+              />
+            )}
           </div>
         </div>
       )}
@@ -2746,19 +2894,18 @@ function Chatbot({
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages, loading]);
 
+  // Clicking a risk that's already expanded collapses it (toggle),
+  // clicking a different risk switches to it. Shared by both the
+  // Gap Analysis cards and the risk badges inside the report table
+  // itself, so behavior is consistent everywhere a risk can be opened.
+  function toggleModalItem(item) {
+    setModalItem((prev) => (prev && prev.area === item.area ? null : item));
+  }
+
+  const latestReportContent = [...messages].reverse().find((m) => m.isAuditReport)?.content || "";
+
   return (
     <section className={generalMode ? "chatbot-card chatbot-card-general" : "chatbot-card"}>
-      {modalItem && (
-        <ItemModal
-          item={modalItem}
-          onClose={() => setModalItem(null)}
-          reportId={reportId}
-          agentId={agentId}
-          currentReportContent={[...messages].reverse().find((m) => m.isAuditReport)?.content || ""}
-          onRiskEvidenceRegenerated={handleRiskEvidenceRegenerated}
-        />
-      )}
-
       <div className="chatbot-messages">
         {messages.map((msg, i) => (
           <div key={`${msg.role}-${i}`}
@@ -2768,13 +2915,18 @@ function Chatbot({
             </div>
             <div className={msg.role === "user" ? "chat-message user-message" : "chat-message assistant-message"}>
               <ReactMarkdown remarkPlugins={[remarkGfm]}
-                components={buildComponents(msg.isAuditReport, msg.riskData, (item) => setModalItem(item))}>
+                components={buildComponents(msg.isAuditReport, msg.riskData, toggleModalItem)}>
                 {msg.content}
               </ReactMarkdown>
               {msg.isAuditReport && (
                 <GapAnalysisPanel
                   riskData={msg.riskData}
-                  onItemClick={(item) => setModalItem(item)}
+                  onItemClick={toggleModalItem}
+                  modalItem={modalItem}
+                  reportId={reportId}
+                  agentId={agentId}
+                  currentReportContent={latestReportContent}
+                  onRiskEvidenceRegenerated={handleRiskEvidenceRegenerated}
                 />
               )}
             </div>

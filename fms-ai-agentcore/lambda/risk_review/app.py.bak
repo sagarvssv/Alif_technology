@@ -1,6 +1,5 @@
 import json
 import os
-import re
 import uuid
 from datetime import datetime, timezone
 
@@ -33,19 +32,6 @@ LEGACY_STATUS_MAP = {
     "resolved": "closed_resolved",
     "closed": "closed_resolved",
 }
-
-# ── Risk level calculation (identical to the portal's frontend formula) ──
-RISK_LEVEL_ORDER = ["Low", "Low-Medium", "Medium", "Medium-High", "High"]
-RISK_LEVEL_PCT = {
-    "high": 90,
-    "high (presumed)": 90,
-    "medium-high": 75,
-    "medium": 55,
-    "low-medium": 35,
-    "low": 20,
-    "to be assessed": 50,
-}
-IMPROVED_MAX_PCT = 35  # Low-Medium (35%) or lower = "Improved / Low Risk"
 
 # Which stored list each attachment's "checklist" value points at.
 CHECKLIST_LISTS = {
@@ -108,91 +94,10 @@ def get_review(risk_key):
     }
 
 
-RISK_FLOOR_PCT = 20
-
-
-def split_level(label):
-    """'Medium-High (67%)' -> 'Medium-High'. Plain labels pass through."""
-    return re.sub(r"\s*\(\d{1,3}\s*%\)\s*$", "", str(label or "")).strip()
-
-
-def level_pct(label):
-    return RISK_LEVEL_PCT.get(split_level(label).lower())
-
-
-def classify(pct):
-    return "Improved / Low Risk" if pct is not None and pct <= IMPROVED_MAX_PCT else "Needs Attention"
-
-
-def pct_for(base_pct, done, total):
-    """Same as computeRiskFromProgress in Chatbot.jsx: an equal share off
-    the original % for every item done, reaching 20% when all are done."""
-    if total == 0 or done == 0:
-        return base_pct
-    if done >= total:
-        return min(base_pct, RISK_FLOOR_PCT)
-    # JS Math.round rounds .5 up; Python round() would round half to even.
-    return int(base_pct - (base_pct - RISK_FLOOR_PCT) * (done / total) + 0.5)
-
-
-def label_for(pct):
-    """Lowest level whose % is still >= the current %."""
-    for name in RISK_LEVEL_ORDER:
-        if RISK_LEVEL_PCT[name.lower()] >= pct:
-            return name
-    return "High"
-
-
-def compute_risk_level(review):
-    ai_items = review.get("checklistItems") or []
-    mandatory_items = review.get("mandatoryChecklistItems") or []
-    is_done = lambda i: bool(i.get("satisfied") or i.get("manuallyChecked"))
-    ai_done = sum(1 for i in ai_items if is_done(i))
-    mandatory_done = sum(1 for i in mandatory_items if is_done(i))
-    total = len(ai_items) + len(mandatory_items)
-    done = ai_done + mandatory_done
-
-    counts = {
-        "doneCount": done,
-        "total": total,
-        "aiChecklist": {"done": ai_done, "total": len(ai_items)},
-        "mandatoryChecklist": {"done": mandatory_done, "total": len(mandatory_items)},
-    }
-    base = split_level(review.get("checklistBaseLevel"))
-    if not base:
-        return {
-            "available": False,
-            "reason": "Original risk level not recorded yet. It is saved with the first setChecklist "
-                      "(baseRiskLevel), or send PUT {\"baseRiskLevel\": \"High\"} once.",
-            **counts,
-        }
-
-    base_pct = level_pct(base) if level_pct(base) is not None else 90
-    current_pct = pct_for(base_pct, done, total)
-    current_level = base if (total == 0 or done == 0) else label_for(current_pct)
-    improved_at = next((d for d in range(0, total + 1) if pct_for(base_pct, d, total) <= IMPROVED_MAX_PCT), None)
-
-    return {
-        "available": True,
-        "originalLevel": base,
-        "originalPct": base_pct,
-        "currentLevel": current_level,
-        "currentPct": current_pct,
-        **counts,
-        "pctPerItem": round((base_pct - RISK_FLOOR_PCT) / total, 1) if total and base_pct > RISK_FLOOR_PCT else 0,
-        "classification": classify(current_pct),
-        "improvedThresholdPct": IMPROVED_MAX_PCT,
-        "itemsNeededForNextDrop": 1 if done < total and current_pct > RISK_FLOOR_PCT else None,
-        "itemsNeededForImproved": max(0, improved_at - done) if improved_at is not None else None,
-    }
-
-
 def handle_get(risk_key):
     if not table:
         return response(500, {"error": "RISK_REVIEWS_TABLE not configured"})
-    review = get_review(risk_key)
-    review["riskLevel"] = compute_risk_level(review)
-    return response(200, review)
+    return response(200, get_review(risk_key))
 
 
 # ── Evidence helpers ───────────────────────────────────────────────────
@@ -365,26 +270,16 @@ def handle_put(risk_key, body):
     if set_checklist and isinstance(set_checklist, list) and not existing.get("checklistItems"):
         existing["checklistItems"] = new_checklist(set_checklist)
         base_level = body.get("baseRiskLevel")
-        if base_level and not existing.get("checklistBaseLevel") and level_pct(base_level) is not None:
-            existing["checklistBaseLevel"] = split_level(base_level)
+        if base_level and not existing.get("checklistBaseLevel"):
+            existing["checklistBaseLevel"] = str(base_level)
 
     set_mandatory_checklist = body.get("setMandatoryChecklist")
     if set_mandatory_checklist and isinstance(set_mandatory_checklist, list) and not existing.get("mandatoryChecklistItems"):
         existing["mandatoryChecklistItems"] = new_checklist(set_mandatory_checklist)
 
-    # The ORIGINAL level is recorded once and never overwritten, so every
-    # recalculation steps down from the same anchor (no compounding).
-    base_risk_level = body.get("baseRiskLevel")
-    if base_risk_level and not existing.get("checklistBaseLevel"):
-        if level_pct(base_risk_level) is None:
-            return response(400, {"error": f"baseRiskLevel must be one of {RISK_LEVEL_ORDER + ['High (Presumed)', 'To Be Assessed']}"})
-        existing["checklistBaseLevel"] = split_level(base_risk_level)
-
     new_attachment = body.get("newAttachment")
     if new_attachment and isinstance(new_attachment, dict) and new_attachment.get("fileName"):
-        s3_key = str(new_attachment.get("s3Key") or "").strip()
-        if not s3_key:
-            return response(400, {"error": "newAttachment.s3Key is required (the evidence documentId)"})
+        s3_key = new_attachment.get("s3Key", "")
         item_id = new_attachment.get("itemId")
         checklist = new_attachment.get("checklist") or "ai"
         verdict = normalize_verdict(new_attachment.get("verdict"))
@@ -426,13 +321,6 @@ def handle_put(risk_key, body):
         release_item_after_removal(existing, {"s3Key": remove_attachment["s3Key"]})
         if not removed:
             existing["removeAttachmentNote"] = "No attachment with that s3Key was found; nothing removed."
-    elif remove_attachment and isinstance(remove_attachment, dict) and remove_attachment.get("uploadedAt"):
-        # Cleanup path for records saved without an s3Key (they cannot be
-        # matched by key). Matches on the exact uploadedAt timestamp.
-        existing["attachments"] = [
-            a for a in existing["attachments"]
-            if not (not a.get("s3Key") and a.get("uploadedAt") == remove_attachment["uploadedAt"])
-        ]
 
     update_checklist_item = body.get("updateChecklistItem")
     if update_checklist_item and isinstance(update_checklist_item, dict) and update_checklist_item.get("id"):
@@ -462,7 +350,6 @@ def handle_put(risk_key, body):
         }
     )
 
-    existing["riskLevel"] = compute_risk_level(existing)
     return response(200, existing)
 
 

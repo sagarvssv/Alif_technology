@@ -492,7 +492,12 @@ function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onR
   const [checklistLoading, setChecklistLoading] = useState(false);
   const [checklistError, setChecklistError]     = useState("");
   const [itemUploadState, setItemUploadState]   = useState({}); // { [checklistItemId]: { uploading, stage } }
-  const [itemVerdicts, setItemVerdicts]         = useState({}); // { [checklistItemId]: verdict }
+  // FIX: uploading several files at once for one item used to collapse
+  // down to a SINGLE aggregate verdict, so there was no way to see
+  // "file A satisfied this, file B was unrelated" — just one combined
+  // message. Now each file's own result is tracked separately.
+  // { [checklistItemId]: [{ fileName, s3Key, relevant, resolves_risk, reason }, ...] }
+  const [itemFileResults, setItemFileResults]   = useState({});
   const [justificationOpenId, setJustificationOpenId] = useState(null);
   const [justificationDraft, setJustificationDraft]   = useState("");
 
@@ -503,7 +508,7 @@ function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onR
     setReviewError("");
     setChecklistError("");
     setItemUploadState({});
-    setItemVerdicts({});
+    setItemFileResults({});
     setJustificationOpenId(null);
     setJustificationDraft("");
     fetch(RISK_API(riskKey))
@@ -899,7 +904,7 @@ function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onR
       patch.removeAttachment = { s3Key: checklistItem.satisfiedBy };
     }
     const result = await saveRiskUpdate(patch);
-    setItemVerdicts((prev) => ({ ...prev, [checklistItem.id]: null }));
+    setItemFileResults((prev) => ({ ...prev, [checklistItem.id]: [] }));
     if (result) {
       const baseLevel = result.checklistBaseLevel || item.riskRaw;
       const mergedContent = applyChecklistProgressToReport(
@@ -972,7 +977,9 @@ function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onR
     const files = Array.from(e.target.files || []);
     if (files.length === 0 || !reportId) return;
     setItemUploadState((prev) => ({ ...prev, [checklistItem.id]: { uploading: true, stage: "" } }));
-    setItemVerdicts((prev) => ({ ...prev, [checklistItem.id]: null }));
+    // Fresh results list for this upload batch, so old results from a
+    // previous session don't linger mixed in with new ones.
+    setItemFileResults((prev) => ({ ...prev, [checklistItem.id]: [] }));
     try {
       let existingIds = new Set();
       try {
@@ -984,16 +991,15 @@ function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onR
         );
       } catch {}
 
-      // FIX: uploading several files at once used to unconditionally
-      // re-check EVERY file against this one item and overwrite its
-      // saved verdict each time — so if file #1 satisfied the item but
-      // file #2 (uploaded in the same batch) was unrelated, file #2's
-      // "not satisfied" result would incorrectly wipe out file #1's
-      // valid match. Once any file in this batch satisfies the item,
-      // remaining files are still uploaded/attached (for the record)
-      // but are no longer checked against — and never allowed to
-      // downgrade a satisfied item back to unsatisfied.
-      let alreadySatisfiedThisBatch = !!checklistItem.satisfied;
+      // Every file is checked individually and its OWN result is kept
+      // and shown separately — so uploading 2 files at once clearly
+      // shows "this one satisfied it, that one didn't" instead of one
+      // collapsed message. The item's saved satisfied/satisfiedBy state
+      // can only ever move from false -> true within this batch, never
+      // back down — so a later unrelated file can never undo an earlier
+      // one that genuinely satisfied the item.
+      let satisfiedNow   = !!checklistItem.satisfied;
+      let satisfiedByNow = checklistItem.satisfiedBy || null;
 
       for (const file of files) {
         setItemUploadState((prev) => ({
@@ -1023,33 +1029,40 @@ function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onR
         const evidenceReportId = await waitForRiskEvidenceDocument(file.name, existingIds);
         existingIds.add(evidenceReportId);
 
-        if (alreadySatisfiedThisBatch) {
-          // This item is already satisfied by an earlier file in this
-          // same upload — just record the attachment for the audit
-          // trail, without re-checking relevance or touching the
-          // checklist item's saved state at all.
-          await saveRiskUpdate({ newAttachment: { fileName: file.name, s3Key: evidenceReportId } });
-          continue;
-        }
-
         setItemUploadState((prev) => ({
           ...prev,
-          [checklistItem.id]: { uploading: true, stage: "Checking this item against the document…" },
+          [checklistItem.id]: { uploading: true, stage: `Checking ${file.name} against this item…` },
         }));
         const verdict = await checkChecklistItemRelevance(checklistItem, evidenceReportId);
-        setItemVerdicts((prev) => ({ ...prev, [checklistItem.id]: verdict }));
 
-        const shouldSatisfy = !!(verdict.relevant && verdict.resolves_risk);
-        if (shouldSatisfy) alreadySatisfiedThisBatch = true;
+        setItemFileResults((prev) => ({
+          ...prev,
+          [checklistItem.id]: [
+            ...(prev[checklistItem.id] || []),
+            {
+              fileName: file.name,
+              s3Key: evidenceReportId,
+              relevant: verdict.relevant,
+              resolves_risk: verdict.resolves_risk,
+              reason: verdict.reason,
+              stillOutstanding: verdict.still_outstanding || "",
+            },
+          ],
+        }));
+
+        const fileSatisfies = !!(verdict.relevant && verdict.resolves_risk);
+        if (fileSatisfies && !satisfiedNow) {
+          satisfiedNow   = true;
+          satisfiedByNow = evidenceReportId;
+        }
+
+        const patchItem = { id: checklistItem.id, satisfied: satisfiedNow };
+        if (satisfiedNow) patchItem.satisfiedBy = satisfiedByNow;
+        if (fileSatisfies) patchItem.justification = verdict.reason || "";
 
         const result = await saveRiskUpdate({
           newAttachment: { fileName: file.name, s3Key: evidenceReportId },
-          updateChecklistItem: {
-            id: checklistItem.id,
-            satisfied: shouldSatisfy,
-            satisfiedBy: shouldSatisfy ? evidenceReportId : checklistItem.satisfiedBy || null,
-            justification: verdict.reason || "",
-          },
+          updateChecklistItem: patchItem,
         });
         if (result) {
           const baseLevel = result.checklistBaseLevel || item.riskRaw;
@@ -1068,6 +1081,20 @@ function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onR
       setItemUploadState((prev) => ({ ...prev, [checklistItem.id]: { uploading: false, stage: "" } }));
       e.target.value = "";
     }
+  }
+
+  // Removes ONE specific unrelated file's result from the display and
+  // deletes its attachment record — for cleaning up a wrongly-uploaded
+  // document that didn't satisfy this item, without touching the item's
+  // own satisfied state (it never contributed to it in the first place).
+  async function handleCancelFileResult(checklistItemId, fileResult) {
+    if (fileResult.s3Key) {
+      await saveRiskUpdate({ removeAttachment: { s3Key: fileResult.s3Key } });
+    }
+    setItemFileResults((prev) => ({
+      ...prev,
+      [checklistItemId]: (prev[checklistItemId] || []).filter((r) => r.s3Key !== fileResult.s3Key),
+    }));
   }
 
   return (
@@ -1187,7 +1214,6 @@ function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onR
                     const isDone = ci.satisfied || ci.manuallyChecked;
                     const isLocked = ci.satisfied;
                     const uploadState = itemUploadState[ci.id] || {};
-                    const verdict = itemVerdicts[ci.id];
                     return (
                       <div key={ci.id}
                         style={{
@@ -1291,14 +1317,50 @@ function ItemModal({ item, onClose, reportId, agentId, currentReportContent, onR
                               </label>
                             )}
 
-                            {verdict && !verdict.relevant && (
-                              <div style={{ fontSize: 12, color: "#92400e", marginTop: 6 }}>
-                                ⚠️ That document didn't appear related to this specific item.
-                              </div>
-                            )}
-                            {verdict && verdict.relevant && !verdict.resolves_risk && (
-                              <div style={{ fontSize: 12, color: "#92400e", marginTop: 6 }}>
-                                Related, but not conclusive yet — {verdict.still_outstanding || verdict.reason}
+                            {(itemFileResults[ci.id] || []).length > 0 && (
+                              <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+                                {itemFileResults[ci.id].map((fr) => {
+                                  const isMatch    = fr.relevant && fr.resolves_risk;
+                                  const isPartial  = fr.relevant && !fr.resolves_risk;
+                                  const notRelated = !fr.relevant;
+                                  const boxStyle = isMatch
+                                    ? { background: "#f0fdf4", border: "1px solid #86efac" }
+                                    : isPartial
+                                      ? { background: "#fffbeb", border: "1px solid #fcd34d" }
+                                      : { background: "#fef2f2", border: "1px solid #fca5a5" };
+                                  return (
+                                    <div key={fr.s3Key} style={{
+                                      ...boxStyle, borderRadius: 8, padding: "8px 10px",
+                                    }}>
+                                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+                                        <div style={{ fontSize: 12.5, fontWeight: 700, color: "#1e293b", display: "flex", alignItems: "center", gap: 6 }}>
+                                          <span>{isMatch ? "✅" : isPartial ? "🟡" : "⚠️"}</span>
+                                          <span>{fr.fileName}</span>
+                                        </div>
+                                        {notRelated && (
+                                          <button
+                                            type="button"
+                                            onClick={() => handleCancelFileResult(ci.id, fr)}
+                                            disabled={saving}
+                                            title="Remove this unrelated document"
+                                            style={{
+                                              fontSize: 11, fontWeight: 600, color: "#b91c1c",
+                                              background: "transparent", border: "1px solid #fca5a5",
+                                              borderRadius: 999, padding: "1px 8px", cursor: "pointer",
+                                            }}
+                                          >
+                                            ✕ Cancel
+                                          </button>
+                                        )}
+                                      </div>
+                                      <div style={{ fontSize: 12, color: "#475569", marginTop: 3 }}>
+                                        {isMatch && "Related — this document satisfies this item."}
+                                        {isPartial && `Related, but not conclusive yet — ${fr.stillOutstanding || fr.reason}`}
+                                        {notRelated && "Not related to this specific item."}
+                                      </div>
+                                    </div>
+                                  );
+                                })}
                               </div>
                             )}
                           </div>
